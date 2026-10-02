@@ -1,0 +1,9 @@
+# 本機/開發用覆蓋檔：直接從原始碼建置映像（不經 GHCR）
+# docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  backend-go:
+    build: ./backend
+  db-migrate:
+    build: ./db
+  frontend-web:
+    build: ./frontend

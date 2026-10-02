@@ -1,0 +1,114 @@
+# 歸途 Homeward — Docker Compose
+# 部署位置：/docker-data/homeward/
+# 正式部署：映像由 GitHub Actions 建置並推送到 GHCR，VPS 只需 pull（見 deploy.sh）
+# 本機自建映像：docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+name: homeward
+
+services:
+  # ---------- Go API ----------
+  backend-go:
+    image: ghcr.io/${GH_OWNER:?請在 .env 設定 GH_OWNER}/homeward-backend:${IMAGE_TAG:-latest}
+    container_name: homeward-backend
+    restart: unless-stopped
+    # 以 NAS 目錄擁有者的 UID/GID 運行，確保 Go 有權限寫入 /mnt/nas/homeward-media
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      GIN_MODE: release
+      PORT: "8080"
+      MEDIA_DIR: /data/media
+      BASE_URL: ${BASE_URL:-http://localhost:8080}
+      NOTIFY_INTERVAL_SEC: ${NOTIFY_INTERVAL_SEC:-300}
+      POSTGRES_HOST: postgis-db
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      REDIS_ADDR: redis-cache:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      # 讀寫：Go 把上傳的照片寫進 NAS
+      - /mnt/nas/homeward-media:/data/media
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully   # schema 升級完成才啟動 API
+      postgis-db:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+    networks: [homeward-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------- 資料庫 migration（一次性任務，跑完即退出）----------
+  db-migrate:
+    image: ghcr.io/${GH_OWNER:?請在 .env 設定 GH_OWNER}/homeward-migrate:${IMAGE_TAG:-latest}
+    container_name: homeward-migrate
+    restart: "no"
+    # 資料庫密碼會直接放進連線網址，請只用字母數字（例如 openssl rand -hex 24 產生）
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgis-db:5432/${POSTGRES_DB}?sslmode=disable"
+      - "up"
+    depends_on:
+      postgis-db:
+        condition: service_healthy
+    networks: [homeward-net]
+
+  # ---------- PostgreSQL + PostGIS ----------
+  postgis-db:
+    image: postgis/postgis:16-3.4
+    container_name: homeward-postgis
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks: [homeward-net]   # 不對外開 port，僅容器網路內可達
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------- Redis ----------
+  redis-cache:
+    image: redis:7-alpine
+    container_name: homeward-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - ./data/redis:/data
+    networks: [homeward-net]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # ---------- Nginx：PWA 靜態檔 + 圖片直讀 + API 反代 ----------
+  frontend-web:
+    image: ghcr.io/${GH_OWNER:?請在 .env 設定 GH_OWNER}/homeward-frontend:${IMAGE_TAG:-latest}
+    container_name: homeward-web
+    restart: unless-stopped
+    ports:
+      # 想只允許 Tailscale 訪問，可在 .env 把 WEB_BIND 設為本機的 Tailscale IP
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8080}:80"
+    volumes:
+      # PWA 靜態檔與 nginx.conf 已打包進映像；唯讀掛載 NAS，Nginx 直接讀圖，不經過 Go
+      - /mnt/nas/homeward-media:/data/media:ro
+    depends_on:
+      backend-go:
+        condition: service_healthy
+    networks: [homeward-net]
+
+networks:
+  homeward-net:
+    driver: bridge

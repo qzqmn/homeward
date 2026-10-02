@@ -127,19 +127,6 @@ func (r *CaseRepo) UpdateStatus(ctx context.Context, id, status string) error {
 	return nil
 }
 
-// UpdateStatus 處理結案／標記尋回（PATCH /cases/:id 的底層邏輯）。
-func (r *CaseRepo) UpdateStatus(ctx context.Context, id, status string) error {
-	const q = `UPDATE cases SET status = $2, updated_at = now() WHERE id = $1::uuid`
-	tag, err := r.db.Exec(ctx, q, id, status)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
 type EscalationCandidate struct {
 	ID        string
 	Lng, Lat  float64

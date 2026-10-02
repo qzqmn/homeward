@@ -1,0 +1,22 @@
+package database
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+)
+
+// NewRedis 建立 Redis 客戶端並 Ping 驗證。
+func NewRedis(ctx context.Context, addr, password string, db int) (*redis.Client, error) {
+	rdb := redis.NewClient(&redis.Options{Addr: addr, Password: password, DB: db})
+
+	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := rdb.Ping(pctx).Err(); err != nil {
+		_ = rdb.Close()
+		return nil, fmt.Errorf("redis not reachable: %w", err)
+	}
+	return rdb, nil
+}

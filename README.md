@@ -1,5 +1,6 @@
 # 歸途 Homeward
 
+
 協同尋人 / 尋寵平台（面向香港）。後端 Go(Gin) + PostgreSQL/PostGIS + Redis，前端 Expo(Web PWA)，全部 Docker 化。
 
 ## 目錄結構

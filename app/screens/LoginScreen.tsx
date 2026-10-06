@@ -6,7 +6,7 @@ import { color, space, type as t } from '../theme/tokens';
 
 // 公開資訊，不是密鑰：Telegram bot 的使用者名稱本來就會顯示在登入按鈕上。
 // 真正的驗證密鑰（bot token）只存在後端的環境變數，前端完全不會拿到。
-const TELEGRAM_BOT_USERNAME = 'HomewardHKBot'; // TODO：換成實際申請的 bot username
+const TELEGRAM_BOT_USERNAME = '@CFW02_BOT'; // TODO：換成實際申請的 bot username
 
 /**
  * 登入方式：Telegram Login（主要）。手機簡訊 OTP 的後端 API 已經做好

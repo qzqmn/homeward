@@ -68,8 +68,9 @@ ls -ln /mnt/nas | grep homeward-media  # 確認 NAS 目錄存在且該 UID 可�
 ## API 一覽（`/api/v1`）
 | 方法/路徑 | 說明 | 認證 |
 |---|---|---|
-| `POST /auth/otp/request` | 發送手機 OTP（每 IP 5 次/分鐘） | 無 |
-| `POST /auth/otp/verify` | 驗證 OTP，回傳登入 token | 無 |
+| `POST /auth/telegram` | Telegram Login Widget 驗證，回傳登入 token（目前前端用的登入方式） | 無 |
+| `POST /auth/otp/request` | 發送手機 OTP（每 IP 5 次/分鐘；後端已就緒，前端尚未使用） | 無 |
+| `POST /auth/otp/verify` | 驗證 OTP，回傳登入 token（同上） | 無 |
 | `POST /me/watch-area` | 設定「關注區域」（住家/常去地點），供半徑推播比對 | 需登入 |
 | `POST /me/channels` | 註冊通知渠道（web_push/telegram/whatsapp/email） | 需登入 |
 | `POST /cases` | 建立案件（附 `photo_path` 作封面照；會觸發配對比對與通知排程） | 需登入 |
@@ -108,9 +109,54 @@ ls -ln /mnt/nas | grep homeward-media  # 確認 NAS 目錄存在且該 UID 可�
 水平擴展成多個 `backend-go` 副本，必須改成有分散式鎖（例如用 Redis）或獨立的 worker
 服務，否則每個副本都會各自重複排程。
 
-OTP（`internal/service/otp.go` 的 `sendSMS`）和通知發送（`internal/service/notify.go` 的
-`sendViaChannel`）目前都只把內容印到後端 log，**尚未串接真正的簡訊網關或推播服務**，
-上線前必須替換掉。
+登入主要走 Telegram Login（見下一節），免費、不需要簡訊網關。手機 OTP 的 `sendSMS`
+（`internal/service/otp.go`）還是只把驗證碼印到後端 log，之後真的要加簡訊/WhatsApp
+當第二種登入方式時再接。通知發送（`internal/service/notify.go` 的 `sendViaChannel`）
+已經改成呼叫 `NOTIFY_WEBHOOK_URL`，設定了就會真的送出，沒設定才會退回印 log（見下面
+「通知 webhook」一節）。
+
+## Telegram 登入設定
+目前登入方式是 Telegram Login Widget（官方功能），不是簡訊 OTP——免費、不用
+註冊第三方商業帳號、比打驗證碼更順手。手機 OTP 的後端 API 還在（見下面 API
+一覽），只是沒有接真正的簡訊網關，前端也還沒放對應畫面。
+
+1. Telegram 搜尋 **@BotFather**，傳 `/newbot`，依指示取名字、取 username
+   （一定要以 `bot` 結尾，例如 `HomewardHKBot`），拿到一組 bot token。
+2. 把 token 填進 VPS 的 `.env`：`TELEGRAM_BOT_TOKEN=<拿到的 token>`。
+3. 對 @BotFather 傳 `/setdomain`，選你的 bot，填入 `homeward.688689.xyz`
+   （不用寫 `https://`，也不用寫路徑）——Telegram Login Widget 只會在你登記過
+   的網域上運作，這是官方的防偽造機制。
+4. 把 `app/screens/LoginScreen.tsx` 裡的 `TELEGRAM_BOT_USERNAME` 改成你 bot
+   的 username（不是 token，username 是公開資訊，寫在前端沒關係）。
+5. 重新部署後端（讀新的 `.env`）、重新建置前端（bot username 改了要重新
+   `expo export`）。
+
+驗證簽章只需要 bot token，後端不會主動呼叫 Telegram API 發任何訊息。
+
+## 通知 webhook
+通知要怎麼送出去，由你自己的服務決定——後端完全不知道 Telegram bot token
+之類的憑證，只會在 `NOTIFY_WEBHOOK_URL` 設定了的時候，把每則通知 POST 過去：
+```json
+{
+  "channel": "telegram",
+  "address": "123456789",
+  "kind": "case_nearby",
+  "payload": { "radius_m": 1500 }
+}
+```
+- `channel`：`telegram` / `web_push` / `whatsapp` / `email`（目前只有登入時
+  會自動註冊 `telegram`，其他要另外呼叫 `POST /me/channels`）。
+- `address`：`user_channels.address` 的原始值——Telegram 是 chat id 字串。
+- `kind`：通知種類，目前只有 `case_nearby`（附近有案件）。
+- `payload`：原始 JSON，依 `kind` 不同內容不同。
+
+Worker 只要看 HTTP 狀態碼：回 2xx 視為送達成功；其他狀態碼（含逾時、連線
+失敗）後端會標記失敗並留著下次重試。跟你 `tg-ssh-monitor` 那個 Worker是
+同樣的模式，用那份程式碼改一下應該很快。沒設定這個網址時，後端只會把內容
+印到 log，不會報錯，方便本機開發先不接通知也能測。
+
+想換通知方式（例如哪天想加 WhatsApp），不需要改後端程式碼或重新部署，
+直接改 `.env` 的 `NOTIFY_WEBHOOK_URL`、讓它指去新的 Worker 就好。
 
 ## 隱私設計備註
 - `cases.public_center` 是自動吸附到約 550m 格網的公開位置；API 對外只能回傳它，`center` 僅限案主與認證志願者（`users.volunteer_verified_at IS NOT NULL`）。
@@ -129,6 +175,14 @@ curl -I http://localhost:8080/media/2026/09/xxxx.jpg   # Nginx 直接從 NAS 讀
 ```
 
 ## 注意
-- PWA 的 Service Worker 與定位 API 都要求 HTTPS，上線前請在 Nginx 前加 Cloudflare Tunnel / Caddy。接 Cloudflare 時務必依 `nginx.conf` 內註解還原真實 IP，否則限流會把所有人視為同一個來源。
+- 對外走 Cloudflare Tunnel，網域是 `homeward.688689.xyz`（已設定在 `.env.example` 的
+  `BASE_URL`）。`nginx.conf` 已經實際啟用還原真實訪客 IP 的設定（不是註解提醒而已），
+  原理與信任範圍的理由寫在該檔案裡；如果部署後發現限流把所有人當成同一個來源，
+  先去查後端 log 印出的來源 IP 是不是訪客的真實 IP。
+- 地圖底圖從 Carto 換成 OpenFreeMap（`app/lib/MapView.web.tsx`）：Carto 從 2026 年
+  8 月起把無金鑰底圖鎖起來要求 API key 了，原本的地圖會整個空白就是這個原因。
+  **這個改動我沒辦法在自己的環境完整驗證**（我的沙盒連不到任何底圖服務，包含
+  原本的 Carto 和現在的 OpenFreeMap），部署後麻煩實際打開看一下地圖有沒有正常
+  顯示街道，沒有的話把瀏覽器主控台（F12 → Console）的錯誤訊息貼給我。
 - Postgres / Redis 沒有對外開 port，僅容器網路內可達。
 - 每次 CI 建置由 `go mod tidy` 解析依賴；建議本機執行一次 `go mod tidy` 並 commit `go.sum`。

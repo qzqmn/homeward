@@ -109,6 +109,20 @@ func (s *AuthService) CreateSession(ctx context.Context, token, userID string) e
 	return s.rdb.Set(ctx, sessionKey(token), userID, sessionTTL).Err()
 }
 
+// IssueSession 產生新的 session token 並直接建立對應的登入 session，給非 OTP
+// 的登入方式（例如 Telegram Login）使用——這類方式驗證身份後已經知道 userID，
+// 不像 OTP 要先驗證碼、再等呼叫端另外建立使用者，所以不需要分兩步。
+func (s *AuthService) IssueSession(ctx context.Context, userID string) (string, error) {
+	token, err := randomHex(32)
+	if err != nil {
+		return "", fmt.Errorf("generate session token: %w", err)
+	}
+	if err := s.CreateSession(ctx, token, userID); err != nil {
+		return "", fmt.Errorf("create session: %w", err)
+	}
+	return token, nil
+}
+
 // UserIDForToken 驗證 Bearer token 並回傳對應的 user id；不存在或過期回傳 redis.Nil。
 func (s *AuthService) UserIDForToken(ctx context.Context, token string) (string, error) {
 	return s.rdb.Get(ctx, sessionKey(token)).Result()

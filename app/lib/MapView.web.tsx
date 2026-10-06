@@ -24,16 +24,38 @@ export interface MapViewProps {
   zoom?: number;
   markers?: MapMarker[];
   onMarkerPress?: (id: string) => void;
+  /** 點擊地圖本身（非標記點）時回報座標；發布協尋流程用它來選「最後出現地點」。 */
+  onMapPress?: (lng: number, lat: number) => void;
 }
 
-// 免金鑰的公開底圖樣式（Carto 的 demo 樣式）；正式環境建議換成自己申請的底圖服務，
-// 避免流量大時被限速或樣式變動。
-const DEFAULT_STYLE = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
+// OpenFreeMap：免 API key、無次數限制、不需註冊的公開底圖服務，專門為了
+// 取代「免費但隨時可能開始要求付費」的底圖供應商而生。
+//
+// 原本用的是 Carto 的無金鑰底圖，但 Carto 從 2026 年 8 月起把無金鑰的底圖
+// 加上「API KEY REQUIRED」浮水印／整個不給載入，導致地圖變成空白——如果
+// 之後地圖又突然空白，第一件事就是檢查目前用的底圖供應商是不是又改了
+// 政策，不一定是我們自己的程式碼壞掉。
+//
+// OpenFreeMap 官方條款說明這是「as-is、服務可能變動或中止」，不是有合約
+// 保證的服務；真的很在意穩定度的話，它也提供可以自架的版本
+// （https://github.com/hyperknot/openfreemap）。
+const DEFAULT_STYLE = 'https://tiles.openfreemap.org/styles/positron';
 
-export default function MapView({ centerLng, centerLat, zoom = 13, markers = [], onMarkerPress }: MapViewProps) {
+export default function MapView({
+  centerLng,
+  centerLat,
+  zoom = 13,
+  markers = [],
+  onMarkerPress,
+  onMapPress,
+}: MapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const markersRef = useRef<Map<string, Marker>>(new Map());
+  // 用 ref 存最新的 callback：地圖只建立一次，但 onMapPress 可能每次 render 都是新的函式參照，
+  // 用 ref 避免因此重新綁定事件監聽器（或把舊的閉包鎖死）。
+  const onMapPressRef = useRef(onMapPress);
+  onMapPressRef.current = onMapPress;
 
   // 地圖只在掛載時建立一次；中心點/縮放改變由下面的 effect 用 flyTo 處理，
   // 避免每次 props 變動就整個重建地圖（會造成閃爍與多餘的網路請求）。
@@ -45,7 +67,11 @@ export default function MapView({ centerLng, centerLat, zoom = 13, markers = [],
       center: [centerLng, centerLat],
       zoom,
     });
-    mapRef.current.addControl(new NavigationControl(), 'top-right');
+    // 放左下角，避開畫面右上角的狀態列（待上傳/登入 chip）跟右下角的浮動按鈕。
+    mapRef.current.addControl(new NavigationControl(), 'bottom-left');
+    mapRef.current.on('click', (e) => {
+      onMapPressRef.current?.(e.lngLat.lng, e.lngLat.lat);
+    });
 
     return () => {
       mapRef.current?.remove();

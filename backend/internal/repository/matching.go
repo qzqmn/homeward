@@ -100,13 +100,20 @@ type Match struct {
 }
 
 // ListForCase 列出某案件目前的配對建議，依分數由高到低排序（含對方案件標題、類型與模糊座標）。
+//
+// 配對只會在「新建立的那個案件」那一側寫一筆（RunFor 只對新案件呼叫），
+// 所以同一組配對對另一個案件來說，caseID 可能出現在 case_id 或 matched_case_id
+// 任一欄——這裡用 OR 兩邊都查，並用 CASE 取出「對方」的 id，確保從任一案件
+// 查都看得到同一筆配對，不會因為查的方向不對而漏掉。
 func (r *MatchRepo) ListForCase(ctx context.Context, caseID string) ([]Match, error) {
 	const q = `
-		SELECT m.matched_case_id::text, m.score, m.status,
+		SELECT
+		       (CASE WHEN m.case_id = $1::uuid THEN m.matched_case_id ELSE m.case_id END)::text AS other_id,
+		       m.score, m.status,
 		       c.title, c.case_type, ST_X(c.public_center), ST_Y(c.public_center)
 		FROM case_matches m
-		JOIN cases c ON c.id = m.matched_case_id
-		WHERE m.case_id = $1::uuid
+		JOIN cases c ON c.id = (CASE WHEN m.case_id = $1::uuid THEN m.matched_case_id ELSE m.case_id END)
+		WHERE m.case_id = $1::uuid OR m.matched_case_id = $1::uuid
 		ORDER BY m.score DESC`
 	rows, err := r.db.Query(ctx, q, caseID)
 	if err != nil {
@@ -126,10 +133,12 @@ func (r *MatchRepo) ListForCase(ctx context.Context, caseID string) ([]Match, er
 }
 
 // UpdateStatus 讓案主確認或排除一筆配對建議（confirmed / rejected）。
+// 同樣要兩個方向都比對，理由見 ListForCase 的註解。
 func (r *MatchRepo) UpdateStatus(ctx context.Context, caseID, matchedCaseID, status string) error {
 	const q = `
 		UPDATE case_matches SET status = $3
-		WHERE case_id = $1::uuid AND matched_case_id = $2::uuid`
+		WHERE (case_id = $1::uuid AND matched_case_id = $2::uuid)
+		   OR (case_id = $2::uuid AND matched_case_id = $1::uuid)`
 	tag, err := r.db.Exec(ctx, q, caseID, matchedCaseID, status)
 	if err != nil {
 		return err

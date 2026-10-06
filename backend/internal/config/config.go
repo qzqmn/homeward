@@ -20,6 +20,17 @@ type Config struct {
 	RedisDB                  int
 
 	NotifyIntervalSec int // 背景通知排程的執行間隔（秒）
+
+	// TelegramBotToken 只用來驗證 Telegram Login Widget 回傳資料的簽章
+	// （HMAC），不會拿去呼叫 Telegram API 發訊息——發通知是另外一條路徑，
+	// 見 NotifyWebhookURL。
+	TelegramBotToken string
+
+	// NotifyWebhookURL：設定了的話，通知改成 POST 到這個網址（例如你自己的
+	// Cloudflare Worker），由那邊決定怎麼轉發到 Telegram／其他管道；bot token
+	// 留在 Worker 那端，後端完全不需要知道。沒設定時只印 log（本機測試用）。
+	// 可以隨時只改這個環境變數、不需要重新編譯或改程式碼。
+	NotifyWebhookURL string
 }
 
 func Load() Config {
@@ -40,6 +51,9 @@ func Load() Config {
 		RedisDB:       getenvInt("REDIS_DB", 0),
 
 		NotifyIntervalSec: getenvInt("NOTIFY_INTERVAL_SEC", 300),
+
+		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
+		NotifyWebhookURL: os.Getenv("NOTIFY_WEBHOOK_URL"),
 	}
 }
 

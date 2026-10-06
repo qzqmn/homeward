@@ -1,9 +1,8 @@
 # app/ — 歸途 Homeward（Expo，Web PWA）
 
-這是一個真實可跑、已驗證過的 Expo 專案（不是示意骨架）：`npm install` 成功、
-`npx tsc --noEmit` 零錯誤、`npx expo export --platform web` 成功產出完整的 PWA
-（manifest.json、icons、index.html 都正確接好），用的是建立當下 npm 上最新的
-Expo SDK（57）。
+真實可跑、已驗證過的 Expo 專案：`npm install`、`npx tsc --noEmit`（零錯誤）、
+`npx expo export --platform web` 都實際跑過。這次還多做了一步——把匯出的頁面用
+Playwright 實際截圖檢查過排版，不是只看型別檢查過關就假設畫面沒問題。
 
 ## 開發
 ```bash
@@ -12,47 +11,63 @@ npm install
 npx expo start --web
 ```
 
-## 匯出 Web PWA（CI 會自動做這件事）
-```bash
-npx expo export --platform web
-# 輸出在 dist/，把它複製到 ../frontend/dist 即可讓 Nginx 服務
-```
-根目錄的 `.github/workflows/build.yml` 偵測到 `app/package.json` 存在時，
-會自動跑這個指令並把 `dist/` 打包進 `homeward-frontend` 映像，不需要手動複製。
+## 設計方向
+見 `theme/tokens.ts` 開頭的註解。核心想法：**介面本身保持安靜、偏冷的中性畫布，
+把溫暖留給照片和關鍵動作**——真正有情感重量的是走失者/寵物的照片，介面不該
+跟它搶注意力。紅色只用在「搜尋中」這個狀態本身，不是品牌主色；綠色留給
+「已團聚」，出現就是好消息。
 
-## 目錄內容
-- `App.tsx` — 示範首頁：MapLibre 地圖 + 待上傳筆數 + 一個示範送出線索的按鈕。
-  串接方式請直接參考這個檔案，比起另外寫一份文件更不容易過時。
-- `lib/offlineQueue.ts` — IndexedDB 離線佇列；**IndexedDB 失敗時會自動退回記憶體
-  內的佇列**（常見於部分瀏覽器的私密瀏覽模式），並提供 `isPersistentStorage()`
-  讓 UI 判斷要不要提醒使用者「請勿關閉分頁」。
-- `lib/syncManager.ts` — 決定何時重試送出（上線事件、回到前景、輪詢、手動重試），
-  處理 iOS Safari 不支援 Background Sync 的問題。
-- `lib/api.ts` — `submitClue()` / `submitTrack()`：線上直接送出，離線時自動轉存佇列。
-- `lib/MapView.tsx` / `lib/MapView.web.tsx` — 地圖元件，依平台自動選擇實作：
-  Web 版用 MapLibre GL JS（純瀏覽器函式庫，直接 `new Map()`／`Marker`／
-  `NavigationControl`，不透過任何 React Native 地圖套件）；原生版目前只是佔位文字，
-  等要支援 iOS/Android 原生 App 時再換成 `@maplibre/maplibre-react-native`
-  （需要 custom dev client，Expo Go 跑不起來）。
-- `public/manifest.json`、`public/index.html`、`public/icon-*.png`、
-  `public/apple-touch-icon.png` — PWA 的安裝資訊（名稱、圖示、`standalone` 顯示模式）
-  與 iOS「加入主畫面」所需的 meta 標籤。**圖示目前是 Expo 範本的預設佔位圖**，
-  正式上線前要換成歸途自己的品牌圖示（192×192、512×512、180×180 三種尺寸）。
-- `AGENTS.md` — Expo 官方範本附帶的 AI agent 使用守則（提醒之後接手的 Claude／
-  其他 agent 不要憑訓練資料猜 Expo API，要先查當下版本的文件）；保留它對之後
-  維護這個專案很有幫助。
+## 畫面
+- `screens/HomeScreen.tsx` — 地圖為主（MapLibre，色點依案件狀態上色；縮放控制
+  放左下角，避開右上角的狀態列）+ 底部附近案件清單 + 右下角暖色「發布協尋」
+  浮動按鈕 + 右上角帳號 chip（未登入顯示「登入」，已登入顯示使用者名稱，
+  點一下已登入狀態會登出）。
+- `screens/CaseDetailScreen.tsx` — 照片為主視覺、狀態/類型/時間、描述、
+  小地圖。進入畫面時若已登入會自動重新查詢一次案件（帶 token），案主本人
+  或認證志願者會換成顯示精確位置，提示文字也會跟著變；一般人看到的仍是
+  模糊範圍。「回報目擊」展開內嵌表單（真正的照片選取與送出，登入時會帶上
+  身份）。「我想當志願者」未登入時導去登入畫面，登入後顯示「已記錄意願，
+  持續追蹤功能開發中」——這部分老實還沒做，見下方已知限制。
+- `screens/ReportCaseScreen.tsx` — 案件類型選擇、照片、標題、描述、輕觸地圖
+  標示最後出現地點、送出。會帶登入 token 打 `POST /api/v1/cases`；未登入時
+  後端回 401，畫面會直接導去登入畫面，而不是卡在一句提示文字。
+- `screens/LoginScreen.tsx` — Telegram Login（免費、不用簡訊網關，見根目錄
+  README「Telegram 登入設定」）。用 `lib/TelegramLoginButton.web.tsx` 嵌入
+  Telegram 官方 widget，驗證成功後把 token 存進 `lib/authStore.ts`
+  （localStorage，失敗時退回記憶體，同一套防私密瀏覽模式的邏輯），登入後
+  導回原本想做的事（發案、查看志願者功能），不會把人晾在登入頁。
+  **`TELEGRAM_BOT_USERNAME` 這個常數要換成實際申請的 bot username才能動。**
+  手機 OTP 的後端 API 還在，但前端目前沒有對應畫面（簡訊網關還沒接，見
+  根目錄 README）。
 
-## 設定串接（目前寫死在 `App.tsx`，之後要換成真正的設定/登入狀態）
-- `API_BASE_URL`：目前寫死成 `https://homeward.example.com`，之後應改讀環境變數
-  或 build-time 設定。
-- 登入 token：`getAuthToken: () => undefined`，等真正的登入流程（手機 OTP）接上
-  狀態管理後，這裡要換成讀取實際 token。
+`App.tsx` 用簡單的 state 切換這三個畫面（沒有引入 react-navigation）——這是
+刻意控制範圍的決定：畫面數量還少，之後要做分享連結深層連結（例如從
+`/c/:id` 分享頁直接開到案件詳情）時，再換成正式的路由方案。
+
+## 共用元件 / 系統
+- `theme/tokens.ts` — 顏色、間距、圓角、字級。
+- `components/Button.tsx`、`components/StatusPill.tsx`、`components/CaseCard.tsx`。
+- `lib/types.ts` — 對應後端 `Case` JSON 形狀。
+- `lib/useNearbyCases.ts` — 讀 `GET /api/v1/cases`；連不上後端時用
+  `lib/sampleCases.ts` 的示範資料頂著，畫面上會標「示範資料」而不是空白或報錯。
+- `lib/MapView.tsx` / `lib/MapView.web.tsx` — 地圖元件（Web 用 MapLibre GL JS，
+  底圖用 OpenFreeMap——原本用 Carto，但它從 2026 年 8 月起無金鑰底圖要收費，
+  換底圖的細節跟驗證限制見根目錄 README「注意」）。這次加了 `onMapPress`，
+  供發布協尋的「輕觸地圖選位置」使用。
+- `lib/TelegramLoginButton.tsx` / `.web.tsx` — Telegram Login Widget（純 Web，
+  原生版是佔位元件）。
+- `lib/offlineQueue.ts` / `lib/syncManager.ts` / `lib/api.ts` — 離線佇列與
+  iOS Safari 重試機制（上次已驗證過）。
 
 ## 已知限制 / 下一步
-- 還沒有真正的相機/相簿選取（`App.tsx` 的示範按鈕用假的 `Blob` 代替照片）。
-- 還沒有登入畫面、案件列表、發案表單——目前只有一個示範首頁證明
-  地圖、離線佇列、同步管理器三者串得起來。
-- PWA 的 Service Worker（離線時連「開啟 App」本身都要能動）還沒做；Expo 官方
-  建議用 Workbox CLI 搭配 `expo export -p web` 產生，可參考
-  `https://docs.expo.dev/guides/progressive-web-apps/` 的 Service Worker 章節。
-- `public/` 內的圖示是佔位圖，上線前要換成真正的品牌圖示。
+- **志願者搜索模式**：登入後按鈕只會顯示「已記錄意願」，沒有真正的持續定位
+  追蹤、Wake Lock 保持螢幕常亮、或呼叫 `POST /cases/:id/tracks`——這是下一個
+  該做的功能，資料庫和後端 API 都已經就緒，缺的是前端這段。
+- 最後出現時間目前固定用「現在」，沒有日期/時間選擇器（需要額外套件，先不加）。
+- `ReportCaseScreen` 目前只能選「走失的寵物／走失的人」，「撿到/發現」類型
+  還沒有入口。
+- 圖示（`public/` 下的 icon）還是 Expo 範本預設圖，要換成真正的品牌圖示。
+- PWA Service Worker（離線時連開啟 App 本身都要能動）還沒做。
+- `authStore.ts` 直接用 `localStorage`，跟 `offlineQueue.ts` 用 `indexedDB` 一樣
+  是瀏覽器限定的寫法，之後要支援原生 iOS/Android App 時需要另外處理
+  （原生版可以換成 `expo-secure-store`）。

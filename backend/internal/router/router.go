@@ -73,10 +73,15 @@ func Build(d Deps) Built {
 
 	authSvc := service.NewAuthService(d.Redis)
 	matchingSvc := service.NewMatchingService(matchRepo)
-	notifySvc := service.NewNotifyService(userRepo, notificationRepo)
+	notifySvc := service.NewNotifyService(userRepo, notificationRepo, d.Cfg.NotifyWebhookURL)
 
 	photoH := &handler.PhotoHandler{MediaDir: d.Cfg.MediaDir, MaxBytes: d.Cfg.MaxUploadBytes}
-	authH := &handler.AuthHandler{Auth: authSvc, Users: userRepo}
+	authH := &handler.AuthHandler{
+		Auth:             authSvc,
+		Users:            userRepo,
+		Channels:         channelRepo,
+		TelegramBotToken: d.Cfg.TelegramBotToken,
+	}
 	caseH := &handler.CaseHandler{Cases: caseRepo, Users: userRepo, Matching: matchingSvc, Notify: notifySvc}
 	clueH := &handler.ClueHandler{Clues: clueRepo}
 	trackH := &handler.TrackHandler{Tracks: trackRepo}
@@ -96,6 +101,9 @@ func Build(d Deps) Built {
 		otp := v1.Group("/auth/otp", middleware.RateLimit(d.Redis, "otp", 5, time.Minute))
 		otp.POST("/request", authH.RequestOTP)
 		otp.POST("/verify", authH.VerifyOTP)
+
+		// Telegram Login：同樣掛限流，避免有人暴力嘗試偽造簽章
+		v1.POST("/auth/telegram", middleware.RateLimit(d.Redis, "telegram-login", 10, time.Minute), authH.TelegramLogin)
 
 		// 上傳限流：每 IP 每分鐘 10 次，避免被濫用刷爆 NAS
 		v1.POST("/cases/upload-photo", middleware.RateLimit(d.Redis, "upload", 10, time.Minute), photoH.Upload)

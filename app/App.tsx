@@ -1,80 +1,88 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Button, SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 
-import MapView from './lib/MapView';
-import { isPersistentStorage, pendingCount } from './lib/offlineQueue';
+import { HomeScreen } from './screens/HomeScreen';
+import { CaseDetailScreen } from './screens/CaseDetailScreen';
+import { ReportCaseScreen } from './screens/ReportCaseScreen';
+import { LoginScreen } from './screens/LoginScreen';
+import { pendingCount as readPendingCount } from './lib/offlineQueue';
 import { SyncManager } from './lib/syncManager';
-import { submitClue } from './lib/api';
+import { getAuthToken, logout } from './lib/authStore';
+import { useAuth } from './lib/useAuth';
+import type { Case } from './lib/types';
+import { color } from './theme/tokens';
 
-// 示範用設定：API 網址與登入 token 之後應該接到真正的設定檔／登入狀態管理，
-// 這裡先寫死，重點是展示 SyncManager／offlineQueue／MapView 怎麼串在一起。
+// 之後應該改成讀環境變數或設定頁；現在先寫死，方便展示。
 const API_BASE_URL = 'https://homeward.example.com';
-const DEMO_CASE_ID = '00000000-0000-0000-0000-000000000000';
-// 香港中心點（demo 用地圖初始位置，實際案件座標應該來自選點或 GPS）
-const HK_CENTER = { lng: 114.1694, lat: 22.3193 };
 
-const sync = new SyncManager({
-  apiBaseUrl: API_BASE_URL,
-  getAuthToken: () => undefined, // 尚未接登入狀態；線索提交允許匿名，所以先留空也能動
-});
+type Route =
+  | { name: 'home' }
+  | { name: 'detail'; item: Case }
+  | { name: 'report' }
+  | { name: 'login'; returnTo: Route };
+
+const sync = new SyncManager({ apiBaseUrl: API_BASE_URL, getAuthToken });
 
 export default function App() {
+  const [route, setRoute] = useState<Route>({ name: 'home' });
   const [pending, setPending] = useState(0);
-  const [persistent, setPersistent] = useState(true);
-  const [lastResult, setLastResult] = useState<string>('');
+  const { user } = useAuth();
 
-  const refreshPendingCount = useCallback(() => {
-    pendingCount().then(setPending);
-    setPersistent(isPersistentStorage());
+  const refreshPending = useCallback(() => {
+    readPendingCount().then(setPending);
   }, []);
 
   useEffect(() => {
     sync.start();
-    refreshPendingCount();
-    const timer = setInterval(refreshPendingCount, 3000); // demo 用輪詢；正式應改由 onQueueChange callback 驅動
+    refreshPending();
+    const timer = setInterval(refreshPending, 3000);
     return () => {
       clearInterval(timer);
       sync.stop();
     };
-  }, [refreshPendingCount]);
+  }, [refreshPending]);
 
-  const handleDemoSubmit = useCallback(async () => {
-    // demo 用的假照片；實際串接相機/相簿選取後，這裡會是使用者選的真實 Blob。
-    const fakePhoto = new Blob(['demo'], { type: 'image/jpeg' });
-    const result = await submitClue(
-      { caseId: DEMO_CASE_ID, lng: HK_CENTER.lng, lat: HK_CENTER.lat, note: '測試線索', photoBlob: fakePhoto },
-      { apiBaseUrl: API_BASE_URL, getAuthToken: () => undefined },
-    );
-    setLastResult(result.status === 'sent' ? '已送出' : `已儲存，待恢復連線後上傳（${result.reason}）`);
-    refreshPendingCount();
-  }, [refreshPendingCount]);
+  const goHome = () => setRoute({ name: 'home' });
+  const requireLogin = (returnTo: Route) => setRoute({ name: 'login', returnTo });
 
   return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.mapWrap}>
-        <MapView
-          centerLng={HK_CENTER.lng}
-          centerLat={HK_CENTER.lat}
-          zoom={11}
-          markers={[{ id: 'demo', lng: HK_CENTER.lng, lat: HK_CENTER.lat, color: '#e5484d' }]}
+    <View style={styles.root}>
+      {route.name === 'home' && (
+        <HomeScreen
+          apiBaseUrl={API_BASE_URL}
+          pendingCount={pending}
+          user={user}
+          onOpenCase={(item) => setRoute({ name: 'detail', item })}
+          onReport={() => setRoute({ name: 'report' })}
+          onAccountPress={() => (user ? logout() : requireLogin({ name: 'home' }))}
         />
-      </View>
-
-      <View style={styles.panel}>
-        <Text style={styles.status}>待上傳：{pending} 筆{!persistent ? '（本次瀏覽無法保存，請勿關閉分頁）' : ''}</Text>
-        {lastResult ? <Text style={styles.status}>{lastResult}</Text> : null}
-        <Button title="示範：提交一筆線索" onPress={handleDemoSubmit} />
-      </View>
-
-      <StatusBar style="auto" />
-    </SafeAreaView>
+      )}
+      {route.name === 'detail' && (
+        <CaseDetailScreen
+          item={route.item}
+          apiBaseUrl={API_BASE_URL}
+          isLoggedIn={!!user}
+          onBack={goHome}
+          onRequireLogin={() => requireLogin(route)}
+        />
+      )}
+      {route.name === 'report' && (
+        <ReportCaseScreen
+          apiBaseUrl={API_BASE_URL}
+          onBack={goHome}
+          onDone={goHome}
+          onRequireLogin={() => requireLogin(route)}
+        />
+      )}
+      {route.name === 'login' && (
+        <LoginScreen apiBaseUrl={API_BASE_URL} onBack={() => setRoute(route.returnTo)} onLoggedIn={() => setRoute(route.returnTo)} />
+      )}
+      <StatusBar style="dark" />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
-  mapWrap: { flex: 1 },
-  panel: { padding: 16, gap: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#ddd' },
-  status: { color: '#333' },
+  root: { flex: 1, backgroundColor: color.canvas },
 });

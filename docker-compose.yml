@@ -18,6 +18,11 @@ services:
       MEDIA_DIR: /data/media
       BASE_URL: ${BASE_URL:-http://localhost:8080}
       NOTIFY_INTERVAL_SEC: ${NOTIFY_INTERVAL_SEC:-300}
+      # 只用來驗證 Telegram Login 的簽章，不會拿去發訊息
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      # 通知要送去哪裡由這個網址決定（例如你的 Cloudflare Worker）；
+      # 空字串時後端只會把通知內容印到 log，不會真的發送
+      NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
       POSTGRES_HOST: postgis-db
       POSTGRES_PORT: "5432"
       POSTGRES_USER: ${POSTGRES_USER}
@@ -60,7 +65,10 @@ services:
 
   # ---------- PostgreSQL + PostGIS ----------
   postgis-db:
-    image: postgis/postgis:16-3.4
+    # 官方 postgis/postgis 沒有 arm64 版本（在 ARM VPS，例如 Oracle Cloud 的 Ampere
+    # 機型，會直接啟動失敗）。imresamu/postgis 是跟官方 postgis/docker-postgis 專案
+    # 密切合作的維護者所出，明確支援 amd64+arm64，環境變數與官方 postgres 映像相容。
+    image: imresamu/postgis:16-3.6-bookworm
     container_name: homeward-postgis
     restart: unless-stopped
     environment:

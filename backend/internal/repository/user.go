@@ -12,7 +12,8 @@ import (
 
 type User struct {
 	ID                  string
-	PhoneE164           string
+	PhoneE164           *string // 選填：可以只用 Telegram 登入，不一定有手機號碼
+	TelegramID          *int64  // 選填：可以只用手機 OTP 登入，不一定連過 Telegram
 	DisplayName         string
 	Locale              string
 	VolunteerVerifiedAt *time.Time // NULL 表示未認證志願者；非 NULL 才可查看案件精確位置
@@ -30,19 +31,32 @@ func (r *UserRepo) UpsertByPhone(ctx context.Context, phoneE164 string) (User, e
 	const q = `
 		INSERT INTO users (phone_e164) VALUES ($1)
 		ON CONFLICT (phone_e164) DO UPDATE SET phone_e164 = EXCLUDED.phone_e164
-		RETURNING id::text, phone_e164, display_name, locale, volunteer_verified_at`
+		RETURNING id::text, phone_e164, telegram_id, display_name, locale, volunteer_verified_at`
 	var u User
 	err := r.db.QueryRow(ctx, q, phoneE164).
-		Scan(&u.ID, &u.PhoneE164, &u.DisplayName, &u.Locale, &u.VolunteerVerifiedAt)
+		Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.DisplayName, &u.Locale, &u.VolunteerVerifiedAt)
+	return u, err
+}
+
+// UpsertByTelegramID 用 Telegram 使用者 id 查找使用者，不存在則建立並帶入
+// Telegram 顯示名稱；Telegram Login Widget 驗證通過後呼叫。
+func (r *UserRepo) UpsertByTelegramID(ctx context.Context, telegramID int64, displayName string) (User, error) {
+	const q = `
+		INSERT INTO users (telegram_id, display_name) VALUES ($1, $2)
+		ON CONFLICT (telegram_id) DO UPDATE SET telegram_id = EXCLUDED.telegram_id
+		RETURNING id::text, phone_e164, telegram_id, display_name, locale, volunteer_verified_at`
+	var u User
+	err := r.db.QueryRow(ctx, q, telegramID, displayName).
+		Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.DisplayName, &u.Locale, &u.VolunteerVerifiedAt)
 	return u, err
 }
 
 func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
-	const q = `SELECT id::text, phone_e164, display_name, locale, volunteer_verified_at
+	const q = `SELECT id::text, phone_e164, telegram_id, display_name, locale, volunteer_verified_at
 	           FROM users WHERE id = $1::uuid AND deleted_at IS NULL`
 	var u User
 	err := r.db.QueryRow(ctx, q, id).
-		Scan(&u.ID, &u.PhoneE164, &u.DisplayName, &u.Locale, &u.VolunteerVerifiedAt)
+		Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.DisplayName, &u.Locale, &u.VolunteerVerifiedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
 	}

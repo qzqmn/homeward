@@ -20,6 +20,7 @@ export interface MapViewProps {
   zoom?: number;
   markers?: MapMarker[];
   onMarkerPress?: (id: string) => void;
+  onMapPress?: (lng: number, lat: number) => void;
 }
 
 export default function MapView(_props: MapViewProps) {

@@ -68,6 +68,7 @@ ls -ln /mnt/nas | grep homeward-media  # 確認 NAS 目錄存在且該 UID 可�
 ## API 一覽（`/api/v1`）
 | 方法/路徑 | 說明 | 認證 |
 |---|---|---|
+| `GET /config` | 前端啟動時讀取的公開設定（目前只有 Telegram bot username，絕不放密鑰） | 無 |
 | `POST /auth/telegram` | Telegram Login Widget 驗證，回傳登入 token（目前前端用的登入方式） | 無 |
 | `POST /auth/otp/request` | 發送手機 OTP（每 IP 5 次/分鐘；後端已就緒，前端尚未使用） | 無 |
 | `POST /auth/otp/verify` | 驗證 OTP，回傳登入 token（同上） | 無 |
@@ -126,10 +127,16 @@ ls -ln /mnt/nas | grep homeward-media  # 確認 NAS 目錄存在且該 UID 可�
 3. 對 @BotFather 傳 `/setdomain`，選你的 bot，填入 `homeward.688689.xyz`
    （不用寫 `https://`，也不用寫路徑）——Telegram Login Widget 只會在你登記過
    的網域上運作，這是官方的防偽造機制。
-4. 把 `app/screens/LoginScreen.tsx` 裡的 `TELEGRAM_BOT_USERNAME` 改成你 bot
-   的 username（不是 token，username 是公開資訊，寫在前端沒關係）。
-5. 重新部署後端（讀新的 `.env`）、重新建置前端（bot username 改了要重新
-   `expo export`）。
+4. 把 bot 的 username（不含 `@`，例如 `MyHomewardBot`）填進 `.env` 的
+   `TELEGRAM_BOT_USERNAME=`。這是公開資訊，前端啟動時會從後端
+   `GET /api/v1/config` 讀取它來顯示登入按鈕——所以改這個**只需要重啟後端，
+   不用重新建置前端**。沒設定時登入頁會顯示「管理員尚未設定 Telegram 登入」。
+5. `docker compose up -d` 重啟後端讓它讀到新的 `.env`。
+
+> **測試注意**：Telegram Login Widget 只會在你用 `/setdomain` 登記過的網域上運作，
+> 用 Tailscale 的 IP（例如 `http://100.x.x.x:48180`）打開頁面時，登入按鈕會顯示
+> 錯誤（無法用在 IP 位址上）。要實際測登入，請等 Cloudflare Tunnel 接好、
+> 用 `https://homeward.688689.xyz` 開啟。
 
 驗證簽章只需要 bot token，後端不會主動呼叫 Telegram API 發任何訊息。
 
@@ -179,6 +186,14 @@ curl -I http://localhost:8080/media/2026/09/xxxx.jpg   # Nginx 直接從 NAS 讀
   `BASE_URL`）。`nginx.conf` 已經實際啟用還原真實訪客 IP 的設定（不是註解提醒而已），
   原理與信任範圍的理由寫在該檔案裡；如果部署後發現限流把所有人當成同一個來源，
   先去查後端 log 印出的來源 IP 是不是訪客的真實 IP。
+- **地圖空白的真正原因有兩個**：(1) Carto 無金鑰底圖從 2026 年 8 月起要收費；(2) MapLibre
+  v6 把處理圖磚的 Web Worker 拆成執行時才載入的獨立檔案，Expo 的 Metro 打包器沒有正確
+  提供它（打包出一個 1KB 的殘缺檔案），結果版權標示、標記點都正常，唯獨圖磚畫不出來。
+  修法：把 `maplibre-gl-worker.mjs` / `maplibre-gl-shared.mjs` 放進 `app/public/` 當靜態檔案，
+  並在 `MapView.web.tsx` 呼叫 `setWorkerUrl('/maplibre-gl-worker.mjs')`；`nginx.conf` 也加了
+  `.mjs` 的 JavaScript MIME type 設定。**升級 maplibre-gl 版本時，要記得把這兩個檔案重新複製
+  一份**（`cp node_modules/maplibre-gl/dist/maplibre-gl-{worker,shared}.mjs app/public/`），
+  否則 worker 與主程式版本不一致會壞掉。
 - 地圖底圖從 Carto 換成 OpenFreeMap（`app/lib/MapView.web.tsx`）：Carto 從 2026 年
   8 月起把無金鑰底圖鎖起來要求 API key 了，原本的地圖會整個空白就是這個原因。
   **這個改動我沒辦法在自己的環境完整驗證**（我的沙盒連不到任何底圖服務，包含

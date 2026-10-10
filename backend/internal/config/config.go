@@ -26,6 +26,11 @@ type Config struct {
 	// 見 NotifyWebhookURL。
 	TelegramBotToken string
 
+	// TelegramBotUsername 是公開資訊（bot 的 @username，不含 @），前端要用它
+	// 嵌入 Telegram 登入按鈕；放在後端環境變數是為了改它只需要改 .env 重啟，
+	// 不用重新建置前端。
+	TelegramBotUsername string
+
 	// NotifyWebhookURL：設定了的話，通知改成 POST 到這個網址（例如你自己的
 	// Cloudflare Worker），由那邊決定怎麼轉發到 Telegram／其他管道；bot token
 	// 留在 Worker 那端，後端完全不需要知道。沒設定時只印 log（本機測試用）。
@@ -52,8 +57,9 @@ func Load() Config {
 
 		NotifyIntervalSec: getenvInt("NOTIFY_INTERVAL_SEC", 300),
 
-		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
-		NotifyWebhookURL: os.Getenv("NOTIFY_WEBHOOK_URL"),
+		TelegramBotToken:    os.Getenv("TELEGRAM_BOT_TOKEN"),
+		TelegramBotUsername: os.Getenv("TELEGRAM_BOT_USERNAME"),
+		NotifyWebhookURL:    os.Getenv("NOTIFY_WEBHOOK_URL"),
 	}
 }
 

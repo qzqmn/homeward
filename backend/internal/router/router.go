@@ -87,6 +87,7 @@ func Build(d Deps) Built {
 	trackH := &handler.TrackHandler{Tracks: trackRepo}
 	meH := &handler.MeHandler{Users: userRepo, Channels: channelRepo}
 	matchH := &handler.MatchHandler{Matches: matchRepo, Cases: caseRepo}
+	appConfigH := &handler.AppConfigHandler{TelegramBotUsername: d.Cfg.TelegramBotUsername}
 	shareH := &handler.ShareHandler{Cases: caseRepo, BaseURL: d.Cfg.BaseURL}
 
 	requireAuth := middleware.AuthRequired(authSvc)
@@ -97,6 +98,7 @@ func Build(d Deps) Built {
 
 	v1 := r.Group("/api/v1")
 	{
+		v1.GET("/config", appConfigH.Get) // 前端啟動時讀取的公開設定
 		// 登入：每 IP 每分鐘最多 5 次請求驗證碼，避免被用來轟炸簡訊
 		otp := v1.Group("/auth/otp", middleware.RateLimit(d.Redis, "otp", 5, time.Minute))
 		otp.POST("/request", authH.RequestOTP)

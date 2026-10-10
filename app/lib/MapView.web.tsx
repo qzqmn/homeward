@@ -7,8 +7,17 @@ import { useEffect, useRef } from 'react';
 import { StyleSheet, View } from 'react-native';
 // maplibre-gl 是純 ESM、沒有 default export；用 MapLibreMap 這個別名避免跟
 // JavaScript 內建的 Map（下面 markersRef 用來追蹤標記點）撞名。
-import { MapLibreMap, Marker, NavigationControl } from 'maplibre-gl';
+import { MapLibreMap, Marker, NavigationControl, setWorkerUrl } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+
+// MapLibre v6 把處理地圖圖磚的工作移到一個「執行時才動態載入」的獨立 Web Worker
+// 檔案，一般打包工具（包括 Expo 用的 Metro）不一定知道要正確產生/提供這個檔案
+// ——沒設定的話地圖的版權標示、我們自畫的標記點都會正常顯示，但實際的圖磚
+// 永遠不會畫出來（因為真正解析圖磚資料的 worker 沒載入成功），整個地圖看起來
+// 像一片空白。解法是明確指到一份我們自己放在 public/ 底下、確定會被原封不動
+// 提供出去的 worker 檔案（連同它內部用相對路徑引用的 maplibre-gl-shared.mjs）。
+// 必須在任何地圖建立「之前」執行，所以放在 component 外、模組載入時就跑一次。
+setWorkerUrl('/maplibre-gl-worker.mjs');
 
 export interface MapMarker {
   id: string;

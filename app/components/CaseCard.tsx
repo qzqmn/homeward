@@ -37,8 +37,13 @@ export function CaseCard({
           {item.title}
         </Text>
         <Text style={styles.meta} numberOfLines={1}>
-          {caseTypeLabel[item.case_type]} · {formatDistanceKm(fromLng, fromLat, item.lng, item.lat)} ·{' '}
-          {formatRelativeTime(item.last_seen_at)}
+          {[
+            caseTypeLabel[item.case_type],
+            formatDistanceKm(fromLng, fromLat, item.lng, item.lat),
+            formatRelativeTime(item.last_seen_at), // 沒填最後出現時間時是空字串，會被濾掉，不留懸空的分隔符
+          ]
+            .filter(Boolean)
+            .join(' · ')}
         </Text>
         <StatusPill status={item.status} />
       </View>

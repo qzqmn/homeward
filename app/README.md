@@ -36,7 +36,8 @@ npx expo start --web
   Telegram 官方 widget，驗證成功後把 token 存進 `lib/authStore.ts`
   （localStorage，失敗時退回記憶體，同一套防私密瀏覽模式的邏輯），登入後
   導回原本想做的事（發案、查看志願者功能），不會把人晾在登入頁。
-  **`TELEGRAM_BOT_USERNAME` 這個常數要換成實際申請的 bot username才能動。**
+  bot username 不寫在前端：啟動時讀後端 `GET /api/v1/config`（`lib/useAppConfig.ts`），
+  由後端 `.env` 的 `TELEGRAM_BOT_USERNAME` 決定，改了只需重啟後端。
   手機 OTP 的後端 API 還在，但前端目前沒有對應畫面（簡訊網關還沒接，見
   根目錄 README）。
 
@@ -59,11 +60,20 @@ npx expo start --web
 - `lib/offlineQueue.ts` / `lib/syncManager.ts` / `lib/api.ts` — 離線佇列與
   iOS Safari 重試機制（上次已驗證過）。
 
+## 連線設定
+`lib/config.ts` 的 `API_BASE_URL` 是空字串＝同網域相對路徑（PWA 與 API 由同一個 Nginx 提供），
+所以用 Tailscale IP 或正式網域開啟都不用重新建置。做原生 App 時才需要改成絕對網址。
+
+## 桌面版
+`components/PhoneFrame.tsx`：視窗寬度 ≥ 560px 時把手機版面置中成一張手機卡片、兩側留安靜的
+背景色；手機寬度則維持滿版。這只是讓桌面瀏覽器看起來「刻意」而不是壞掉——真正針對桌面重新設計
+版面（例如地圖與清單左右並排）還沒做。
+
 ## 已知限制 / 下一步
 - **志願者搜索模式**：登入後按鈕只會顯示「已記錄意願」，沒有真正的持續定位
   追蹤、Wake Lock 保持螢幕常亮、或呼叫 `POST /cases/:id/tracks`——這是下一個
   該做的功能，資料庫和後端 API 都已經就緒，缺的是前端這段。
-- 最後出現時間目前固定用「現在」，沒有日期/時間選擇器（需要額外套件，先不加）。
+- 最後出現時間目前固定送出「現在」（`ReportCaseScreen`），沒有日期/時間選擇器（需要額外套件，先不加）。
 - `ReportCaseScreen` 目前只能選「走失的寵物／走失的人」，「撿到/發現」類型
   還沒有入口。
 - 圖示（`public/` 下的 icon）還是 Expo 範本預設圖，要換成真正的品牌圖示。

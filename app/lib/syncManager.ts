@@ -25,6 +25,9 @@ export interface SyncConfig {
 const DEFAULT_POLL_MS = 30_000;
 const DEFAULT_MAX_BACKOFF_MS = 5 * 60_000;
 
+/** 重試也不會成功的錯誤（例如照片格式不被接受 415、檔案太大 413）。 */
+class PermanentUploadError extends Error {}
+
 export class SyncManager {
   private cfg: Required<Omit<SyncConfig, 'onQueueChange'>> & Pick<SyncConfig, 'onQueueChange'>;
   private flushing = false;
@@ -140,7 +143,9 @@ export class SyncManager {
       return res.ok;
     } catch (err) {
       await recordAttemptFailed(item.clientId, err instanceof Error ? err.message : String(err));
-      return false;
+      // 永久性失敗視為「已處理」讓呼叫端把它移出佇列；否則這一筆會永遠失敗，
+      // 而 flush 遇到失敗就整批停下來，後面所有正常的項目都會被它卡死。
+      return err instanceof PermanentUploadError;
     }
   }
 
@@ -152,7 +157,11 @@ export class SyncManager {
       headers: this.authOnlyHeaders(),
       body: form,
     });
-    if (!res.ok) throw new Error(`upload-photo failed: HTTP ${res.status}`);
+    if (!res.ok) {
+      const permanent = res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429;
+      const msg = `upload-photo failed: HTTP ${res.status}`;
+      throw permanent ? new PermanentUploadError(msg) : new Error(msg);
+    }
     const data: { path: string } = await res.json();
     return data.path;
   }

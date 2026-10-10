@@ -20,6 +20,8 @@ services:
       NOTIFY_INTERVAL_SEC: ${NOTIFY_INTERVAL_SEC:-300}
       # 只用來驗證 Telegram Login 的簽章，不會拿去發訊息
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      # bot 的 @username（不含 @），公開資訊，前端用它嵌入 Telegram 登入按鈕
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
       # 通知要送去哪裡由這個網址決定（例如你的 Cloudflare Worker）；
       # 空字串時後端只會把通知內容印到 log，不會真的發送
       NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}

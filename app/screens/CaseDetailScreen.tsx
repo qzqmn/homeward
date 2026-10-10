@@ -95,7 +95,8 @@ export function CaseDetailScreen({
       <View style={styles.metaRow}>
         <StatusPill status={item.status} />
         <Text style={styles.meta}>
-          {caseTypeLabel[item.case_type]} · 最後出現 {formatRelativeTime(item.last_seen_at)}
+          {caseTypeLabel[item.case_type]}
+          {item.last_seen_at ? ` · 最後出現 ${formatRelativeTime(item.last_seen_at)}` : ''}
         </Text>
       </View>
 

@@ -2,11 +2,8 @@ import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import TelegramLoginButton, { type TelegramAuthData } from '../lib/TelegramLoginButton';
 import { login } from '../lib/authStore';
+import { useAppConfig } from '../lib/useAppConfig';
 import { color, space, type as t } from '../theme/tokens';
-
-// 公開資訊，不是密鑰：Telegram bot 的使用者名稱本來就會顯示在登入按鈕上。
-// 真正的驗證密鑰（bot token）只存在後端的環境變數，前端完全不會拿到。
-const TELEGRAM_BOT_USERNAME = '@CFW02_BOT'; // TODO：換成實際申請的 bot username
 
 /**
  * 登入方式：Telegram Login（主要）。手機簡訊 OTP 的後端 API 已經做好
@@ -18,6 +15,10 @@ const TELEGRAM_BOT_USERNAME = '@CFW02_BOT'; // TODO：換成實際申請的 bot 
 export function LoginScreen({ apiBaseUrl, onBack, onLoggedIn }: { apiBaseUrl: string; onBack: () => void; onLoggedIn: () => void }) {
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState('');
+  // bot username 是公開資訊，由後端 .env 的 TELEGRAM_BOT_USERNAME 提供，
+  // 改它只要重啟後端，不用重新建置前端。
+  const { config, loading: configLoading } = useAppConfig();
+  const botUsername = config?.telegramBotUsername ?? '';
 
   const handleTelegramAuth = async (data: TelegramAuthData) => {
     setSubmitting(true);
@@ -63,7 +64,15 @@ export function LoginScreen({ apiBaseUrl, onBack, onLoggedIn }: { apiBaseUrl: st
       <Text style={styles.hint}>發案和擔任搜索志願者需要登入，瀏覽和回報線索不用。</Text>
 
       <View style={styles.widgetWrap}>
-        <TelegramLoginButton botUsername={TELEGRAM_BOT_USERNAME} onAuth={handleTelegramAuth} />
+        {configLoading ? (
+          <Text style={styles.hint}>載入中…</Text>
+        ) : botUsername ? (
+          <TelegramLoginButton botUsername={botUsername} onAuth={handleTelegramAuth} />
+        ) : (
+          <Text style={styles.message}>
+            {config ? '管理員尚未設定 Telegram 登入（TELEGRAM_BOT_USERNAME）' : '目前連不上伺服器，請稍後再試'}
+          </Text>
+        )}
       </View>
 
       {submitting ? <Text style={styles.message}>登入中…</Text> : null}

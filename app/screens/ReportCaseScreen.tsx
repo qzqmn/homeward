@@ -67,6 +67,9 @@ export function ReportCaseScreen({
           description,
           lng: location.lng,
           lat: location.lat,
+          // 目前沒有時間選擇器，先固定用「現在」；不送的話後端存 NULL，
+          // 列表上就看不到「X 小時前」，配對演算法的時間比對也會失效。
+          last_seen_at: new Date().toISOString(),
           photo_path: photoPath,
         }),
       });

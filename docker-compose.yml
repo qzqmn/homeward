@@ -119,6 +119,23 @@ services:
         condition: service_healthy
     networks: [homeward-net]
 
+  # ---------- Cloudflare Tunnel（選用）----------
+  # 啟用：在 .env 設 COMPOSE_PROFILES=tunnel 與 TUNNEL_TOKEN=<Cloudflare 給的 token>。
+  # 跟其他容器放在同一個 Docker 網路，所以 Cloudflare 儀表板的 Public Hostname
+  # 服務網址要填 http://frontend-web:80 （容器內部網址），不是 localhost——
+  # 在容器裡 localhost 指的是 cloudflared 自己，不是你的 VPS 主機。
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: homeward-cloudflared
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      - frontend-web
+    networks: [homeward-net]
+
 networks:
   homeward-net:
     driver: bridge

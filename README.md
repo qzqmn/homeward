@@ -165,6 +165,49 @@ Worker 只要看 HTTP 狀態碼：回 2xx 視為送達成功；其他狀態碼�
 想換通知方式（例如哪天想加 WhatsApp），不需要改後端程式碼或重新部署，
 直接改 `.env` 的 `NOTIFY_WEBHOOK_URL`、讓它指去新的 Worker 就好。
 
+## Cloudflare Tunnel 設定與排查
+**最常見的錯誤：Public Hostname 的服務網址填 `http://localhost:48180`，但 cloudflared 是跑在
+Docker 容器裡。** 容器裡的 `localhost` 指的是 cloudflared 容器自己，不是 VPS 主機，所以連不到
+Nginx，網頁打不開。判斷方法（在 VPS 上執行）：
+```bash
+docker ps --format '{{.Names}}\t{{.Image}}' | grep -i cloudflared   # 有輸出 = cloudflared 是容器
+systemctl status cloudflared 2>/dev/null | head -3                   # 有輸出 = 直接裝在主機上
+curl -sI http://localhost:48180/ | head -1                           # 主機自己連得到 Nginx 嗎？應為 HTTP/1.1 200 OK
+```
+- cloudflared **直接裝在主機上**，且 `curl` 回 200：`http://localhost:48180` 是對的，問題在別處（看下面的錯誤碼）。
+  若 `curl` 失敗，檢查 `.env` 的 `WEB_BIND`——設成 Tailscale IP 的話，`localhost` 就連不到了。
+- cloudflared **是容器**（`localhost` 在容器裡指向它自己，所以填 `localhost:48180` 一定連不到）。三種解法：
+  1. **最快、不用改任何網路**：Public Hostname 服務改填 **類型 HTTP、網址 `<VPS 的 Tailscale IP>:48180`**
+     （例如 `100.110.17.54:48180`，網址欄只填 `主機:連接埠`）。不同網路的容器連到主機自己的位址
+     與已發布的連接埠，通常連得到；`.env` 的 `WEB_BIND` 要是 `0.0.0.0` 或該 Tailscale IP。
+  2. **推薦、不依賴發布連接埠**：把你現有的 cloudflared 容器接進歸途的 Docker 網路，服務填
+     **類型 HTTP、網址 `frontend-web:80`**：
+     ```bash
+     docker network connect homeward_homeward-net <你的 cloudflared 容器名稱>
+     ```
+     這個指令在 cloudflared 容器被重建後會失效；要永久生效，請在 cloudflared 自己的 compose 檔裡加：
+     ```yaml
+     services:
+       cloudflared:
+         networks: [default, homeward]
+     networks:
+       homeward:
+         external: true
+         name: homeward_homeward-net
+     ```
+  3. 如果你**還沒有** cloudflared，才用本專案 compose 內建的 `cloudflared` 服務（見 `.env.example`
+     最後面）；已經有一個在跑就不需要啟用它。
+
+在瀏覽器打開 `https://homeward.688689.xyz` 時看到的 Cloudflare 錯誤碼：
+| 錯誤 | 意思 |
+|---|---|
+| 1033 | Tunnel 沒連上（cloudflared 沒在跑、或 token 不對） |
+| 502 / 521 | Tunnel 連上了，但連不到你填的服務網址（上面 localhost 的問題） |
+| 1016 / DNS 找不到 | 該網域沒有指到 Tunnel（Public Hostname 沒建立成功） |
+
+接通後別忘了：把 `.env` 的 `BASE_URL` 改成 `https://homeward.688689.xyz`（分享連結用），
+並確認 @BotFather 的 `/setdomain` 設的是 `homeward.688689.xyz`。
+
 ## 隱私設計備註
 - `cases.public_center` 是自動吸附到約 550m 格網的公開位置；API 對外只能回傳它，`center` 僅限案主與認證志願者（`users.volunteer_verified_at IS NOT NULL`）。
 - 離線重送：客戶端為每筆線索/軌跡產生 `client_id`（UUID），後端以 `ON CONFLICT (client_id) DO NOTHING` 保證重送不重複。

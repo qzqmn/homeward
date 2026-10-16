@@ -9,6 +9,7 @@ import { StyleSheet, View } from 'react-native';
 // JavaScript 內建的 Map（下面 markersRef 用來追蹤標記點）撞名。
 import { MapLibreMap, Marker, NavigationControl, setWorkerUrl } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import { color } from '../theme/tokens';
 
 // MapLibre v6 把處理地圖圖磚的工作移到一個「執行時才動態載入」的獨立 Web Worker
 // 檔案，一般打包工具（包括 Expo 用的 Metro）不一定知道要正確產生/提供這個檔案
@@ -27,6 +28,22 @@ export interface MapMarker {
   color?: string;
 }
 
+/**
+ * 覆蓋熱圖的一格：志願者搜索軌跡聚合成 ~100m 格網後的呈現。
+ * 不用精確圓半徑（公尺）而是像素尺寸——這是「哪裡搜過」的示意圖，不是量測工具。
+ */
+export interface MapCircle {
+  id: string;
+  lng: number;
+  lat: number;
+  /** 填色；預設用「已搜索」的綠 */
+  color?: string;
+  /** 熱度 0~1：1 = 剛搜過/多人搜過，0 = 很久以前只經過一次 */
+  heat?: number;
+  /** 直徑（px），預設 20 */
+  diameterPx?: number;
+}
+
 export interface MapViewProps {
   centerLng: number;
   centerLat: number;
@@ -35,6 +52,8 @@ export interface MapViewProps {
   onMarkerPress?: (id: string) => void;
   /** 點擊地圖本身（非標記點）時回報座標；發布協尋流程用它來選「最後出現地點」。 */
   onMapPress?: (lng: number, lat: number) => void;
+  /** 覆蓋熱圖格（畫在標記點下方，不可點擊） */
+  circles?: MapCircle[];
 }
 
 // OpenFreeMap：免 API key、無次數限制、不需註冊的公開底圖服務，專門為了
@@ -57,10 +76,12 @@ export default function MapView({
   markers = [],
   onMarkerPress,
   onMapPress,
+  circles = [],
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const markersRef = useRef<Map<string, Marker>>(new Map());
+  const circlesRef = useRef<Map<string, Marker>>(new Map());
   // 用 ref 存最新的 callback：地圖只建立一次，但 onMapPress 可能每次 render 都是新的函式參照，
   // 用 ref 避免因此重新綁定事件監聽器（或把舊的閉包鎖死）。
   const onMapPressRef = useRef(onMapPress);
@@ -97,6 +118,32 @@ export default function MapView({
     const map = mapRef.current;
     if (!map) return;
 
+    // ---- 覆蓋熱圖格：低 z-index 壓在普通標記點下面，且不可點擊 ----
+    for (const c of circles) {
+      const id = `cov-${c.id}`;
+      const existing = circlesRef.current.get(id);
+      const el = document.createElement('div');
+      const heat = Math.min(1, Math.max(0, c.heat ?? 0.5));
+      // 熱度直接表現在透明度：剛搜過的格子清楚、久遠的格子淡出
+      el.style.cssText =
+        `width:${c.diameterPx ?? 20}px;height:${c.diameterPx ?? 20}px;border-radius:50%;` +
+        `background:${c.color ?? color.hope};opacity:${0.25 + heat * 0.45};` +
+        'pointer-events:none;z-index:1;';
+      if (existing) {
+        // Marker 不提供事後換 element 的 API；熱度變化時刪掉重建（格數有限，成本可接受）
+        existing.remove();
+        circlesRef.current.delete(id);
+      }
+      const marker = new Marker({ element: el }).setLngLat([c.lng, c.lat]).addTo(map);
+      circlesRef.current.set(id, marker);
+    }
+    for (const [id, marker] of circlesRef.current) {
+      if (!circles.some((c) => `cov-${c.id}` === id)) {
+        marker.remove();
+        circlesRef.current.delete(id);
+      }
+    }
+
     const seen = new Set<string>();
     for (const m of markers) {
       seen.add(m.id);
@@ -121,7 +168,7 @@ export default function MapView({
         markersRef.current.delete(id);
       }
     }
-  }, [markers, onMarkerPress]);
+  }, [markers, circles, onMarkerPress]);
 
   return <View style={styles.container}><div ref={containerRef} style={{ width: '100%', height: '100%' }} /></View>;
 }

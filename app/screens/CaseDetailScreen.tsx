@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import MapView from '../lib/MapView';
 import { Button } from '../components/Button';
@@ -23,11 +23,13 @@ export function CaseDetailScreen({
   apiBaseUrl,
   onBack,
   onRequireLogin,
+  onStartSearch,
 }: {
   item: Case;
   apiBaseUrl: string;
   onBack: () => void;
   onRequireLogin: () => void;
+  onStartSearch: (item: Case) => void;
 }) {
   const [item, setItem] = useState(initialItem);
   const [clues, setClues] = useState<Clue[] | null>(null);
@@ -37,6 +39,8 @@ export function CaseDetailScreen({
   const [submitting, setSubmitting] = useState(false);
   const [submitMessage, setSubmitMessage] = useState('');
   const [closing, setClosing] = useState(false);
+  /** 正在點開大圖的線索照片（null = 沒有開著） */
+  const [viewerPhoto, setViewerPhoto] = useState<string | null>(null);
 
   // 登入狀態（含登入完成的即時變化）本頁自己訂閱：案主登入後要立刻重查
   // 精確座標與線索列表，不需要重導路由。
@@ -119,18 +123,21 @@ export function CaseDetailScreen({
   };
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <Pressable onPress={onBack} style={styles.backRow}>
-        <Text style={styles.backText}>← 返回</Text>
-      </Pressable>
+    <>
+      <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+        <Pressable onPress={onBack} style={styles.backRow}>
+          <Text style={styles.backText}>← 返回</Text>
+        </Pressable>
 
-      {item.photo_url ? (
-        <Image source={{ uri: item.photo_url }} style={styles.hero} />
-      ) : (
-        <View style={[styles.hero, styles.heroPlaceholder]}>
-          <Text style={styles.heroEmoji}>{typeEmoji[item.case_type]}</Text>
-        </View>
-      )}
+        {item.photo_url ? (
+          <Pressable onPress={() => setViewerPhoto(item.photo_url)}>
+            <Image source={{ uri: item.photo_url }} style={styles.hero} resizeMode="cover" />
+          </Pressable>
+        ) : (
+          <View style={[styles.hero, styles.heroPlaceholder]}>
+            <Text style={styles.heroEmoji}>{typeEmoji[item.case_type]}</Text>
+          </View>
+        )}
 
       <Text style={styles.title}>{item.title}</Text>
       <View style={styles.metaRow}>
@@ -172,13 +179,18 @@ export function CaseDetailScreen({
             <Text style={styles.clueEmpty}>還沒有人回報目擊。</Text>
           ) : (
             clues.map((clue) => (
-              <View key={clue.id} style={styles.clueItem}>
-                <Image source={{ uri: clue.photo_url }} style={styles.cluePhoto} />
+              <Pressable
+                key={clue.id}
+                style={({ pressed }) => [styles.clueItem, pressed && styles.clueItemPressed]}
+                onPress={() => setViewerPhoto(clue.photo_url)}
+              >
+                <Image source={{ uri: clue.photo_url }} style={styles.cluePhoto} resizeMode="cover" />
                 <View style={styles.clueBody}>
                   <Text style={styles.clueTime}>{formatRelativeTime(clue.sighted_at)}目擊</Text>
-                  {clue.note ? <Text style={styles.clueNote}>{clue.note}</Text> : null}
+                  {clue.note ? <Text style={styles.clueNote} numberOfLines={3}>{clue.note}</Text> : null}
+                  <Text style={styles.clueCta}>點一下看全圖</Text>
                 </View>
-              </View>
+              </Pressable>
             ))
           )}
         </View>
@@ -187,8 +199,17 @@ export function CaseDetailScreen({
       {!reporting ? (
         <View style={styles.ctaRow}>
           <Button label="回報目擊" onPress={() => setReporting(true)} fullWidth />
-          {/* 搜索志願者功能未實作：直白說明，不假裝「已記錄意願」。 */}
-          <Text style={styles.volunteerHint}>志願者搜索模式開發中，尚未開放報名。</Text>
+          {/* 志願者入口：登入後即可開搜索模式（軌跡上報 + 覆蓋熱圖） */}
+          <Button
+            label={item.status === 'open' ? (token ? '開始搜索（志願者模式）' : '我想幫忙搜索') : '案件已結束搜索'}
+            variant="secondary"
+            disabled={item.status !== 'open'}
+            onPress={() => (token ? onStartSearch(item) : onRequireLogin())}
+            fullWidth
+          />
+          <Text style={styles.volunteerHint}>
+            搜索模式會記錄你的位置軌跡，讓大家都知道哪些區域已經找過。
+          </Text>
         </View>
       ) : (
         <View style={styles.reportForm}>
@@ -217,7 +238,18 @@ export function CaseDetailScreen({
       )}
 
       {submitMessage ? <Text style={styles.submitMessage}>{submitMessage}</Text> : null}
-    </ScrollView>
+      </ScrollView>
+
+      {/* 線索/封面照片全螢幕檢視：點背面關閉 */}
+      <Modal visible={viewerPhoto !== null} transparent animationType="fade" onRequestClose={() => setViewerPhoto(null)}>
+        <Pressable style={styles.viewerBackdrop} onPress={() => setViewerPhoto(null)}>
+          {viewerPhoto ? (
+            <Image source={{ uri: viewerPhoto }} style={styles.viewerImage} resizeMode="contain" />
+          ) : null}
+          <Text style={styles.viewerHint}>點一下關閉</Text>
+        </Pressable>
+      </Modal>
+    </>
   );
 }
 
@@ -273,10 +305,20 @@ const styles = StyleSheet.create({
     ...shadow.card,
   },
   cluePhoto: { width: 72, height: 72, borderRadius: radius.sm, backgroundColor: color.surfaceAlt },
+  clueItemPressed: { opacity: 0.85 },
   clueBody: { flex: 1 },
   clueTime: { ...t.caption, color: color.inkFaint },
   clueNote: { ...t.body, color: color.ink, marginTop: space.xs },
+  clueCta: { ...t.caption, color: color.home, marginTop: space.xs },
   clueEmpty: { ...t.bodyMedium, color: color.inkSoft, marginTop: space.sm },
   volunteerHint: { ...t.caption, color: color.inkFaint, textAlign: 'center' },
   submitMessage: { ...t.bodyMedium, color: color.hope, marginTop: space.md, textAlign: 'center' },
+  viewerBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15,18,24,0.94)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  viewerImage: { width: '100%', height: '78%' },
+  viewerHint: { ...t.caption, color: 'rgba(255,255,255,0.6)', marginTop: space.md },
 });

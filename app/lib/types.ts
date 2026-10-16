@@ -32,3 +32,11 @@ export interface Clue {
   sighted_at: string;
   created_at: string;
 }
+
+/** 對應後端 GET /api/v1/cases/:id/coverage（公開）的回傳形狀：覆蓋熱圖的一格。 */
+export interface CoverageCell {
+  lng: number;
+  lat: number;
+  point_count: number;
+  last_visited: string;
+}

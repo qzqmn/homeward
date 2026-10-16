@@ -2,12 +2,11 @@ import type { ReactNode } from 'react';
 import { StyleSheet, View, useWindowDimensions } from 'react-native';
 import { color, shadow } from '../theme/tokens';
 
-// 寬螢幕（桌面瀏覽器）時，把手機版面置中成一張「手機卡片」，兩側填上安靜的
-// 背景色，而不是讓窄版的手機版面孤伶伶地貼在視窗角落——這是行動優先的 PWA
-// 很常見的處理方式（例如很多銀行、社群 App 的網頁版）。真正針對桌面重新設計
-// 版面是更大的工程，這裡先用這個「刻意看起來像手機」的版本頂著。
-const MAX_WIDTH = 480;
-const WIDE_BREAKPOINT = 560;
+// 桌面瀏覽器適配：寬螢幕時不要把內容鎖在 480px 的「手機殼」裡——
+// 改成置中、上限 720px 的響應式欄位，地圖/照片/列表都能用上更多空間，
+// 同時維持單欄版面（桌面版雙欄是之後的事）。其餘仍行動優先。
+const MAX_WIDTH = 720;
+const WIDE_BREAKPOINT = 760;
 
 export function PhoneFrame({ children }: { children: ReactNode }) {
   const { width } = useWindowDimensions();
@@ -19,7 +18,7 @@ export function PhoneFrame({ children }: { children: ReactNode }) {
 
   return (
     <View style={styles.wideOuter}>
-      <View style={styles.phoneCard}>{children}</View>
+      <View style={styles.wideCard}>{children}</View>
     </View>
   );
 }
@@ -29,14 +28,12 @@ const styles = StyleSheet.create({
   wideOuter: {
     flex: 1,
     alignItems: 'center',
-    justifyContent: 'center',
     backgroundColor: color.surfaceAlt,
   },
-  phoneCard: {
-    width: MAX_WIDTH,
-    height: '90%',
-    maxHeight: 900,
-    borderRadius: 24,
+  wideCard: {
+    width: '100%',
+    maxWidth: MAX_WIDTH,
+    flex: 1,
     overflow: 'hidden',
     backgroundColor: color.canvas,
     ...shadow.floating,

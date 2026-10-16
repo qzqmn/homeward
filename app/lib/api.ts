@@ -4,7 +4,7 @@
  */
 
 import { enqueue, newClientId } from './offlineQueue';
-import type { Case, Clue } from './types';
+import type { Case, Clue, CoverageCell } from './types';
 import type { CaseStatus } from '../theme/tokens';
 
 export interface SubmitClueInput {
@@ -151,6 +151,18 @@ export async function listClues(caseId: string, deps: SubmitDeps): Promise<Clue[
     if (!res.ok) return null;
     const data = (await res.json()) as { clues: Clue[] };
     return data.clues;
+  } catch {
+    return null;
+  }
+}
+
+/** 搜索覆蓋熱圖（公開端點）；失敗一律回 null，由畫面決定怎麼呈現。 */
+export async function getCoverage(caseId: string, deps: SubmitDeps): Promise<CoverageCell[] | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${caseId}/coverage`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { cells: CoverageCell[] };
+    return data.cells;
   } catch {
     return null;
   }

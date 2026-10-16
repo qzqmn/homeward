@@ -7,6 +7,7 @@ import { HomeScreen } from './screens/HomeScreen';
 import { CaseDetailScreen } from './screens/CaseDetailScreen';
 import { ReportCaseScreen } from './screens/ReportCaseScreen';
 import { AccountScreen } from './screens/AccountScreen';
+import { TrackSearchScreen } from './screens/TrackSearchScreen';
 import { LoginScreen } from './screens/LoginScreen';
 import { pendingCount as readPendingCount } from './lib/offlineQueue';
 import { SyncManager } from './lib/syncManager';
@@ -20,6 +21,7 @@ import { color } from './theme/tokens';
 type Route =
   | { name: 'home' }
   | { name: 'detail'; item: Case }
+  | { name: 'search'; item: Case }
   | { name: 'report' }
   | { name: 'account' };
 
@@ -91,6 +93,15 @@ export default function App() {
             item={route.item}
             apiBaseUrl={API_BASE_URL}
             onBack={goHome}
+            onRequireLogin={() => setLoginReturnTo(route)}
+            onStartSearch={(cs) => openRoute({ name: 'search', item: cs })}
+          />
+        )}
+        {route.name === 'search' && (
+          <TrackSearchScreen
+            item={route.item}
+            apiBaseUrl={API_BASE_URL}
+            onBack={() => openRoute({ name: 'detail', item: route.item })}
             onRequireLogin={() => setLoginReturnTo(route)}
           />
         )}

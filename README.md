@@ -89,13 +89,19 @@ ls -ln /mnt/nas | grep homeward-media  # 確認 NAS 目錄存在且該 UID 可�
 | `POST /cases/upload-photo` | 上傳照片（**僅接受 JPEG/PNG**；上傳時重新編碼剝除 EXIF→GPS 座標不會外洩。每 IP 10 次/分鐘。上傳後 72 小時未被任何案件/線索引用的檔案會被背景清理） | 無 |
 | `GET /c/:id`（根路徑，非 `/api/v1`） | 分享預覽頁：給 WhatsApp/Facebook/Telegram 爬蟲讀 OG meta，真人點擊會自動轉去 PWA | 無 |
 
-尚未實作：案件時間軸（`case_updates`）、舉報處理（`reports`）、SOS（`sos_events`）、
-搜索志願者模式（`volunteer_tracks` 只能收資料，前端沒有搜索畫面）——
+尚未實作：案件時間軸（`case_updates`）、舉報處理（`reports`）、SOS（`sos_events`）——
 資料表已在 migration 建好，仍需要對應的 handler／畫面。
 
 主線「發案 → 路人回報線索 → 案主收通知並看到線索 → 結案」已打通：
 案主會在 `GET /me/cases` 看到自己的案件、詳情頁可看線索列表與結案按鈕、
-分享連結會直達詳情頁。
+分享連結會直達詳情頁。線索與封面照片可點開全螢幕檢視。
+
+### 志願者搜索模式
+詳情頁「開始搜索（志願者模式）」→ 搜索畫面：登入使用者以瀏覽器 Geolocation
+持續定位，每 15 秒上報一個軌跡點到 `POST /cases/:id/tracks`（離線進佇列補送），
+並定時拉 `GET /cases/:id/coverage` 畫出「已搜索過」的覆蓋熱圖（越綠越近期），
+避免志願者重複搜索同一區。開啟時用 Screen Wake Lock 讓螢幕常亮；
+離開畫面立即停止記錄。PWA 需以 HTTPS 提供才能使用定位。
 
 ### 配對（撿到 ↔ 走失）
 建案時（任何類型）會自動比對「類型相對」（`missing_pet`↔`found_pet` 等）、5 公里內、

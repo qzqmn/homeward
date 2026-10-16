@@ -14,6 +14,16 @@ export interface MapMarker {
   color?: string;
 }
 
+/** 覆蓋熱圖的一格（原生版未實作，僅保持介面一致） */
+export interface MapCircle {
+  id: string;
+  lng: number;
+  lat: number;
+  color?: string;
+  heat?: number;
+  diameterPx?: number;
+}
+
 export interface MapViewProps {
   centerLng: number;
   centerLat: number;
@@ -21,6 +31,7 @@ export interface MapViewProps {
   markers?: MapMarker[];
   onMarkerPress?: (id: string) => void;
   onMapPress?: (lng: number, lat: number) => void;
+  circles?: MapCircle[];
 }
 
 export default function MapView(_props: MapViewProps) {

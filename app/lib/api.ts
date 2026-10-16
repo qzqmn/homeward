@@ -1,9 +1,11 @@
 /**
- * 對外的提交函式：線上直接打 API；失敗（離線或網路錯誤）時退回寫入離線佇列，
- * 呼叫端永遠拿到「已受理」的結果，不需要自己判斷網路狀態。
+ * 對外的 API 呼叫集中地：讀取類直接打 API，提交類（線索/軌跡）失敗時
+ * 退回寫入離線佇列，呼叫端永遠拿到「已受理」的結果，不需要自己判斷網路狀態。
  */
 
 import { enqueue, newClientId } from './offlineQueue';
+import type { Case, Clue } from './types';
+import type { CaseStatus } from '../theme/tokens';
 
 export interface SubmitClueInput {
   caseId: string;
@@ -33,7 +35,7 @@ export async function submitClue(input: SubmitClueInput, deps: SubmitDeps): Prom
   const clientId = newClientId();
 
   try {
-    const photoPath = await uploadPhotoNow(input.photoBlob, deps);
+    const photoPath = await uploadPhoto(input.photoBlob, deps);
     const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${input.caseId}/clues`, {
       method: 'POST',
       headers: jsonHeaders(deps),
@@ -91,7 +93,84 @@ export async function submitTrack(input: SubmitTrackInput, deps: SubmitDeps): Pr
   }
 }
 
-async function uploadPhotoNow(blob: Blob, deps: SubmitDeps): Promise<string> {
+// ---- 讀取類 / 需要即時結果的操作（離線不佇列，直接回傳 null/false 由畫面顯示錯誤）----
+
+/** 對應後端 POST /api/v1/cases 的請求內容。 */
+export interface CreateCaseInput {
+  case_type: string;
+  title: string;
+  description: string;
+  lng: number;
+  lat: number;
+  last_seen_at: string;
+  photo_path?: string;
+  police_report_no?: string;
+}
+
+/** 發案需要登入（401 由呼叫端轉浮層登入）；網路錯誤會直接擲出。 */
+export async function createCase(body: CreateCaseInput, deps: SubmitDeps): Promise<Response> {
+  const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases`, {
+    method: 'POST',
+    headers: jsonHeaders(deps),
+    body: JSON.stringify(body),
+  });
+  return res;
+}
+
+export async function getCase(id: string, deps: SubmitDeps): Promise<Case | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${id}`, {
+      headers: authOnlyHeaders(deps),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as Case;
+  } catch {
+    return null;
+  }
+}
+
+export async function listMyCases(deps: SubmitDeps): Promise<Case[] | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/me/cases`, {
+      headers: authOnlyHeaders(deps),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { cases: Case[] };
+    return data.cases;
+  } catch {
+    return null;
+  }
+}
+
+/** 403（非案主/志願者）與其他錯誤一律回 null；永不擲出。 */
+export async function listClues(caseId: string, deps: SubmitDeps): Promise<Clue[] | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${caseId}/clues`, {
+      headers: authOnlyHeaders(deps),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { clues: Clue[] };
+    return data.clues;
+  } catch {
+    return null;
+  }
+}
+
+export async function updateCaseStatus(caseId: string, status: CaseStatus, deps: SubmitDeps): Promise<boolean> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${caseId}/status`, {
+      method: 'PATCH',
+      headers: jsonHeaders(deps),
+      body: JSON.stringify({ status }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** 上傳照片，回傳要寫進 clue/createCase 的 photo_path；失敗擲出（呼叫端決定要不要佇列）。 */
+export async function uploadPhoto(blob: Blob, deps: SubmitDeps): Promise<string> {
   const form = new FormData();
   form.append('photo', blob, 'photo.jpg');
   const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/upload-photo`, {

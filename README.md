@@ -14,6 +14,7 @@ homeward/
 │   ├── Dockerfile               # 把 migrations 打包成映像（golang-migrate）
 │   └── migrations/              # 000001 初始表 / 000002 geography 索引 / 000003 users 與擴充 /
 │   │                             # 000004 流程表 / 000005 封面照＋關注區域＋通知去重
+│   │                             # 000007 通知多渠道唯一索引修正（每渠道一筆）＋FK 索引
 ├── backend/                     # Go API
 │   ├── Dockerfile
 │   ├── cmd/server/main.go
@@ -78,16 +79,23 @@ ls -ln /mnt/nas | grep homeward-media  # 確認 NAS 目錄存在且該 UID 可�
 | `GET /cases?lat=&lng=&radius_m=` | 附近案件（回傳模糊座標） | 無 |
 | `GET /cases/:id` | 案件詳情（本人或認證志願者可看精確座標） | 選填 |
 | `PATCH /cases/:id/status` | 結案／標記已團聚（`open`/`found`/`closed`） | 僅案主 |
-| `POST /cases/:id/clues` | 提交線索（`client_id` 冪等，支援離線重送） | 選填 |
+| `POST /cases/:id/clues` | 提交線索（`client_id` 冪等，支援離線重送；每 IP 10 次/分鐘） | 選填 |
+| `GET /cases/:id/clues` | 案件的目擊線索列表（僅案主本人或認證志願者可看） | 需登入 |
+| `GET /me/cases` | 「我的案件」清單（**含已結案的**，案主結案後找得到自己發過的案子） | 需登入 |
 | `POST /cases/:id/tracks` | 上報志願者軌跡點（`client_id` 冪等） | 需登入 |
 | `GET /cases/:id/coverage` | 搜索覆蓋熱圖（軌跡依格網聚合） | 無 |
 | `GET /cases/:id/matches` | 系統建議的撿到/走失配對 | 僅案主 |
 | `PATCH /cases/:id/matches/:matchedId` | 確認／排除一筆配對建議 | 僅案主 |
-| `POST /cases/upload-photo` | 上傳照片（每 IP 10 次/分鐘） | 無 |
+| `POST /cases/upload-photo` | 上傳照片（**僅接受 JPEG/PNG**；上傳時重新編碼剝除 EXIF→GPS 座標不會外洩。每 IP 10 次/分鐘。上傳後 72 小時未被任何案件/線索引用的檔案會被背景清理） | 無 |
 | `GET /c/:id`（根路徑，非 `/api/v1`） | 分享預覽頁：給 WhatsApp/Facebook/Telegram 爬蟲讀 OG meta，真人點擊會自動轉去 PWA | 無 |
 
-尚未實作：案件時間軸（`case_updates`）、舉報處理（`reports`）、SOS（`sos_events`）——
-資料表已在 migration 建好，仍需要對應的 handler。
+尚未實作：案件時間軸（`case_updates`）、舉報處理（`reports`）、SOS（`sos_events`）、
+搜索志願者模式（`volunteer_tracks` 只能收資料，前端沒有搜索畫面）——
+資料表已在 migration 建好，仍需要對應的 handler／畫面。
+
+主線「發案 → 路人回報線索 → 案主收通知並看到線索 → 結案」已打通：
+案主會在 `GET /me/cases` 看到自己的案件、詳情頁可看線索列表與結案按鈕、
+分享連結會直達詳情頁。
 
 ### 配對（撿到 ↔ 走失）
 建案時（任何類型）會自動比對「類型相對」（`missing_pet`↔`found_pet` 等）、5 公里內、
@@ -148,14 +156,24 @@ ls -ln /mnt/nas | grep homeward-media  # 確認 NAS 目錄存在且該 UID 可�
   "channel": "telegram",
   "address": "123456789",
   "kind": "case_nearby",
-  "payload": { "radius_m": 1500 }
+  "payload": {
+    "radius_m": 1500,
+    "case_id": "0b8f...",
+    "case_type": "missing_pet",
+    "case_title": "小白（橘白色唐貓）",
+    "share_url": "https://homeward.688689.xyz/c/0b8f...",
+    "photo_url": "/media/2026/09/xxxx.jpg"
+  }
 }
 ```
 - `channel`：`telegram` / `web_push` / `whatsapp` / `email`（目前只有登入時
   會自動註冊 `telegram`，其他要另外呼叫 `POST /me/channels`）。
 - `address`：`user_channels.address` 的原始值——Telegram 是 chat id 字串。
-- `kind`：通知種類，目前只有 `case_nearby`（附近有案件）。
-- `payload`：原始 JSON，依 `kind` 不同內容不同。
+- `kind`：通知種類——
+  - `case_nearby`：附近有案件（payload 像上面，含案件標題與分享連結）；
+  - `clue`：案主收到新線索（payload 另含 `clue_id`/`clue_note`/`clue_photo_url` 等）。
+- `payload`：原始 JSON，依 `kind` 不同內容不同（**之前只有 `radius_m`，
+  Worker 無從得知要通知什麼——現在才算完整**）。
 
 Worker 只要看 HTTP 狀態碼：回 2xx 視為送達成功；其他狀態碼（含逾時、連線
 失敗）後端會標記失敗並留著下次重試。跟你 `tg-ssh-monitor` 那個 Worker是
@@ -211,6 +229,7 @@ curl -sI http://localhost:48180/ | head -1                           # 主機自
 ## 隱私設計備註
 - `cases.public_center` 是自動吸附到約 550m 格網的公開位置；API 對外只能回傳它，`center` 僅限案主與認證志願者（`users.volunteer_verified_at IS NOT NULL`）。
 - 離線重送：客戶端為每筆線索/軌跡產生 `client_id`（UUID），後端以 `ON CONFLICT (client_id) DO NOTHING` 保證重送不重複。
+- 上傳照片會在後端重新編碼剝除 EXIF（含 GPS），公開的 `/media/` 不會洩漏拍攝位置（`app/` 端挑的照片若是 WebP 會被拒收）。
 - 志願者軌跡屬個人資料：需在開啟「搜索模式」時顯示收集聲明，並訂定保留期限（結案後定期刪除）。
 - `users.watch_center` 同樣是個人資料（間接透露住家/常去地點），只用於半徑推播比對，
   API 不會把它回傳給除本人以外的任何人；使用者應該能隨時清除（目前還沒有對應的
@@ -221,7 +240,8 @@ curl -sI http://localhost:48180/ | head -1                           # 主機自
 curl -F "photo=@cat.jpg" http://localhost:8080/api/v1/cases/upload-photo
 # {"path":"2026/09/xxxx.jpg","url":"/media/2026/09/xxxx.jpg"}
 curl -I http://localhost:8080/media/2026/09/xxxx.jpg   # Nginx 直接從 NAS 讀取
-# 連續超過 10 次/分鐘會得到 429
+# 連續超過 10 次/分鐘會得到 429；只接受 JPEG/PNG（上傳時重新編碼剝掉 EXIF/[GPS]）
+# 上傳 .webp 會得到 415
 ```
 
 ## 注意
@@ -243,4 +263,5 @@ curl -I http://localhost:8080/media/2026/09/xxxx.jpg   # Nginx 直接從 NAS 讀
   原本的 Carto 和現在的 OpenFreeMap），部署後麻煩實際打開看一下地圖有沒有正常
   顯示街道，沒有的話把瀏覽器主控台（F12 → Console）的錯誤訊息貼給我。
 - Postgres / Redis 沒有對外開 port，僅容器網路內可達。
-- 每次 CI 建置由 `go mod tidy` 解析依賴；建議本機執行一次 `go mod tidy` 並 commit `go.sum`。
+- `go.sum` 已 commit：backend/Dockerfile 現在用 `go mod download`（依賴版本可重現），
+  替換 `go mod tidy` 即時解析的做法。改動依賴時本機執行 `go mod tidy` 更新 go.sum 再 commit。

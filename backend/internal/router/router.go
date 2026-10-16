@@ -73,7 +73,7 @@ func Build(d Deps) Built {
 
 	authSvc := service.NewAuthService(d.Redis)
 	matchingSvc := service.NewMatchingService(matchRepo)
-	notifySvc := service.NewNotifyService(userRepo, notificationRepo, d.Cfg.NotifyWebhookURL)
+	notifySvc := service.NewNotifyService(userRepo, notificationRepo, d.Cfg.NotifyWebhookURL, d.Cfg.BaseURL)
 
 	photoH := &handler.PhotoHandler{MediaDir: d.Cfg.MediaDir, MaxBytes: d.Cfg.MaxUploadBytes}
 	authH := &handler.AuthHandler{
@@ -83,7 +83,7 @@ func Build(d Deps) Built {
 		TelegramBotToken: d.Cfg.TelegramBotToken,
 	}
 	caseH := &handler.CaseHandler{Cases: caseRepo, Users: userRepo, Matching: matchingSvc, Notify: notifySvc}
-	clueH := &handler.ClueHandler{Clues: clueRepo}
+	clueH := &handler.ClueHandler{Clues: clueRepo, Cases: caseRepo, Users: userRepo, Notify: notifySvc}
 	trackH := &handler.TrackHandler{Tracks: trackRepo}
 	meH := &handler.MeHandler{Users: userRepo, Channels: channelRepo}
 	matchH := &handler.MatchHandler{Matches: matchRepo, Cases: caseRepo}
@@ -114,6 +114,7 @@ func Build(d Deps) Built {
 		{
 			me.POST("/watch-area", meH.SetWatchArea)  // 設定關注區域，供半徑推播比對
 			me.POST("/channels", meH.RegisterChannel) // 註冊通知渠道
+			me.GET("/cases", caseH.ListMine)          // 我的案件（含已結案的），案主清單入口
 		}
 
 		cases := v1.Group("/cases")
@@ -122,7 +123,9 @@ func Build(d Deps) Built {
 			cases.POST("", requireAuth, caseH.Create)                                // 發案需登入；會觸發配對比對與通知排程
 			cases.GET("/:id", optionalAuth, caseH.Get)                               // 詳情：依權限決定精確/模糊座標
 			cases.PATCH("/:id/status", requireAuth, caseH.UpdateStatus)              // 結案／標記已團聚，僅限案主
-			cases.POST("/:id/clues", optionalAuth, clueH.Create)                     // 提交線索免登入，登入可關聯身份
+			// 提交線索免登入，登入可關聯身份。掛限流防匿名灌水
+			cases.POST("/:id/clues", middleware.RateLimit(d.Redis, "clue-create", 10, time.Minute), optionalAuth, clueH.Create)
+			cases.GET("/:id/clues", requireAuth, clueH.List) // 線索列表：僅案主本人或認證志願者
 			cases.POST("/:id/tracks", requireAuth, trackH.Create)                    // 上報軌跡需登入（志願者搜索模式）
 			cases.GET("/:id/coverage", trackH.Coverage)                              // 公開：搜索覆蓋熱圖
 			cases.GET("/:id/matches", requireAuth, matchH.List)                      // 配對建議，僅案主可見

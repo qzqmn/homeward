@@ -56,6 +56,9 @@ func main() {
 	go service.RunNotifyLoop(ctx, time.Duration(cfg.NotifyIntervalSec)*time.Second,
 		repository.NewCaseRepo(pg), built.Notify)
 
+	// 背景排程：孤兒照片清理（上傳 72h 未被引用即刪）。
+	go service.RunMediaGCLoop(ctx, cfg.MediaDir, repository.NewMediaRepo(pg))
+
 	go func() {
 		log.Printf("homeward api listening on %s (media dir: %s)", srv.Addr, cfg.MediaDir)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

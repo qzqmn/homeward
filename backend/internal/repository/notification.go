@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -12,15 +11,12 @@ type NotificationRepo struct{ db *pgxpool.Pool }
 func NewNotificationRepo(db *pgxpool.Pool) *NotificationRepo { return &NotificationRepo{db: db} }
 
 // EnqueueCaseNearby 幫每位使用者已註冊的每個通知渠道各排一筆「附近有案件」通知。
-// 靠 000005 migration 的 uq_notifications_case_nearby 唯一索引防止同一使用者、
-// 同一案件被重複推播（例如半徑擴大時，已收過通知的人不會再收到第二次）。
-func (r *NotificationRepo) EnqueueCaseNearby(ctx context.Context, caseID string, userIDs []string, radiusM int) (int, error) {
+// 靠 000007 migration 的 uq_notifications_case_nearby 唯一索引（含 channel）防止同一
+// 使用者、同一案件被重複推播（例如半徑擴大時，已收過通知的人不會再收到第二次），
+// 同時不同渠道各自保留一筆。
+func (r *NotificationRepo) EnqueueCaseNearby(ctx context.Context, caseID string, userIDs []string, payload []byte) (int, error) {
 	if len(userIDs) == 0 {
 		return 0, nil
-	}
-	payload, err := json.Marshal(map[string]any{"radius_m": radiusM})
-	if err != nil {
-		return 0, err
 	}
 
 	const q = `
@@ -28,8 +24,32 @@ func (r *NotificationRepo) EnqueueCaseNearby(ctx context.Context, caseID string,
 		SELECT u.id::uuid, $1::uuid, c.channel, 'case_nearby', $2::jsonb
 		FROM unnest($3::uuid[]) AS u(id)
 		JOIN user_channels c ON c.user_id = u.id
-		ON CONFLICT (user_id, case_id, kind) WHERE kind = 'case_nearby' DO NOTHING`
+		ON CONFLICT (user_id, case_id, channel, kind) WHERE kind = 'case_nearby' DO NOTHING`
 	tag, err := r.db.Exec(ctx, q, caseID, payload, userIDs)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// EnqueueToUser 把一則通知排給「某一位使用者」的所有已註冊渠道（例如案主的新線索通知）。
+// kind 必須是 notifications 表 CHECK 允許、且「沒有」去重唯一索引的種類——
+// 線索通知屬於重複發生的事件（每一則新線索都該通知一次），由呼叫端單次呼叫保證
+// 不重複，所以這裡用動態 SQL 組 kind。傳入未列於白名單的 kind 會回傳錯誤。
+func (r *NotificationRepo) EnqueueToUser(ctx context.Context, userID, caseID, kind string, payload []byte) (int, error) {
+	var channelKind string
+	switch kind {
+	case "clue", "case_update", "match", "system":
+		channelKind = kind
+	default:
+		return 0, ErrInvalidNotificationKind
+	}
+
+	const q = `
+		INSERT INTO notifications (user_id, case_id, channel, kind, payload)
+		SELECT $1::uuid, $2::uuid, c.channel, $3::text, $4::jsonb
+		FROM user_channels c WHERE c.user_id = $1::uuid`
+	tag, err := r.db.Exec(ctx, q, userID, caseID, channelKind, payload)
 	if err != nil {
 		return 0, err
 	}
@@ -86,8 +106,15 @@ func (r *NotificationRepo) MarkSent(ctx context.Context, id int64) error {
 	return err
 }
 
-func (r *NotificationRepo) MarkFailed(ctx context.Context, id int64) error {
-	const q = `UPDATE notifications SET status = 'failed', attempts = attempts + 1 WHERE id = $1`
+// MarkSendFailed 處理發送失敗：只遞增 attempts，狀態維持 queued 讓下一次排程重試；
+// 達到 maxSendAttempts 次才標記 failed（不再被 FetchDueForSend 取出）。
+// 之前的寫法（第一次失敗就直接 failed）會讓 webhook 短暫逾時就永久丟掉通知。
+func (r *NotificationRepo) MarkSendFailed(ctx context.Context, id int64) error {
+	const q = `
+		UPDATE notifications
+		SET attempts = attempts + 1,
+		    status   = CASE WHEN attempts + 1 >= 5 THEN 'failed' ELSE 'queued' END
+		WHERE id = $1`
 	_, err := r.db.Exec(ctx, q, id)
 	return err
 }

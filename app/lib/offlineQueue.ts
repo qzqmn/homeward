@@ -163,6 +163,23 @@ export async function recordAttemptFailed(clientId: string, errorMessage: string
   );
 }
 
+/** 把（例如重試時剛上傳成功取得的）photo_path 寫回佇列項目，避免下一次重試重複上傳同一張照片。 */
+export async function updatePayload(clientId: string, payload: Record<string, unknown>): Promise<void> {
+  await withFallback(
+    async () => {
+      const item = await withStore<PendingItem | undefined>('readonly', (store) => store.get(clientId));
+      if (!item) return;
+      item.payload = payload;
+      await withStore('readwrite', (store) => store.put(item));
+    },
+    () => {
+      const item = memoryStore.get(clientId);
+      if (!item) return;
+      item.payload = payload;
+    },
+  );
+}
+
 export async function pendingCount(): Promise<number> {
   return withFallback(
     () => withStore<number>('readonly', (store) => store.count()),

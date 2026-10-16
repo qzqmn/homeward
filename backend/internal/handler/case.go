@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -16,6 +17,17 @@ import (
 )
 
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// photoPathRe 驗證 photo_path 必須是 upload-photo 回傳的相對路徑格式
+// （YYYY/MM/32hex.jpg｜png）。客戶端字串一律先過這關，防止引用任意（甚至別人的）
+// 媒體檔案當封面照。body 驗證屬 handler 職責，不只在 repository 擋 SQL injection。
+var photoPathRe = regexp.MustCompile(`^[0-9]{4}/[0-9]{2}/[0-9a-f]{32}\.(jpg|png)$`)
+
+const (
+	maxTitleLen       = 100
+	maxDescriptionLen = 2000
+	maxCaseRadiusM    = 20000
+)
 
 type CaseHandler struct {
 	Cases    *repository.CaseRepo
@@ -60,8 +72,23 @@ func (h *CaseHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid lng/lat"})
 		return
 	}
+	if utf8.RuneCountInString(body.Title) > maxTitleLen {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "title too long (max 100 chars)"})
+		return
+	}
+	if utf8.RuneCountInString(body.Description) > maxDescriptionLen {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "description too long (max 2000 chars)"})
+		return
+	}
+	if body.PhotoPath != nil && *body.PhotoPath != "" && !photoPathRe.MatchString(*body.PhotoPath) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid photo_path"})
+		return
+	}
 	if body.SearchRadiusM <= 0 {
 		body.SearchRadiusM = 3000
+	}
+	if body.SearchRadiusM > maxCaseRadiusM {
+		body.SearchRadiusM = maxCaseRadiusM
 	}
 
 	created, err := h.Cases.Create(c.Request.Context(), repository.NewCase{
@@ -87,13 +114,18 @@ func (h *CaseHandler) Create(c *gin.Context) {
 		log.Printf("WARN: matching for case %s failed: %v", created.ID, err)
 	}
 	if created.CaseType == "missing_person" || created.CaseType == "missing_pet" {
-		if err := h.Notify.EscalateAndEnqueue(c.Request.Context(), created.ID, created.Lng, created.Lat, created.CreatedAt); err != nil {
+		cand := repository.EscalationCandidate{
+			ID: created.ID, CaseType: created.CaseType, Title: created.Title,
+			PhotoPath: created.PhotoPath, Lng: created.Lng, Lat: created.Lat,
+			CreatedAt: created.CreatedAt,
+		}
+		if err := h.Notify.EscalateAndEnqueue(c.Request.Context(), cand); err != nil {
 			log.Printf("WARN: notify enqueue for case %s failed: %v", created.ID, err)
 		}
 	}
 
 	// 建立者一律看得到精確座標（自己的案件）
-	c.JSON(http.StatusCreated, caseJSON(created, true))
+	c.JSON(http.StatusCreated, caseJSON(created, true, true))
 }
 
 type updateStatusBody struct {
@@ -136,6 +168,26 @@ func (h *CaseHandler) UpdateStatus(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// ListMine 處理 GET /api/v1/me/cases：回傳登入者建立的所有案件（含已結案的），
+// 讓案主可以在「我的案件」清單找到自己發過的案子，不再只能從附近清單撈
+// （結案後案件會從附近清單消失，案主就再也找不到）。
+func (h *CaseHandler) ListMine(c *gin.Context) {
+	userID, _ := middleware.UserID(c)
+
+	cases, err := h.Cases.ListByOwner(c.Request.Context(), userID, 100)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list cases"})
+		return
+	}
+
+	out := make([]gin.H, 0, len(cases))
+	for _, cs := range cases {
+		// 案主本人：精確座標 + is_owner（前端據此顯示結案按鈕）
+		out = append(out, caseJSON(cs, true, true))
+	}
+	c.JSON(http.StatusOK, gin.H{"cases": out})
+}
+
 // Get 處理 GET /api/v1/cases/:id。精確座標（center）只回給案主或已認證志願者，
 // 其餘一律回傳 public_center（格網模糊化後的座標）。
 func (h *CaseHandler) Get(c *gin.Context) {
@@ -155,7 +207,7 @@ func (h *CaseHandler) Get(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, caseJSON(cs, h.canSeePrecise(c, cs)))
+	c.JSON(http.StatusOK, caseJSON(cs, h.canSeePrecise(c, cs), h.isOwnerOf(c, cs)))
 }
 
 // canSeePrecise：本人的案件，或已通過志願者認證的登入使用者，才能看精確座標。
@@ -172,6 +224,16 @@ func (h *CaseHandler) canSeePrecise(c *gin.Context, cs repository.Case) bool {
 		return false
 	}
 	return user.IsVerifiedVolunteer()
+}
+
+// isOwnerOf 判斷本次請求的使用者是不是案件的建立者。cheap check（不查 DB），
+// caseJSON 回傳的 is_owner 欄位就是這個——前端據此決定顯示「結案／已團聚」按鈕。
+func (h *CaseHandler) isOwnerOf(c *gin.Context, cs repository.Case) bool {
+	userID, ok := middleware.UserID(c)
+	if !ok || cs.OwnerID == nil {
+		return false
+	}
+	return *cs.OwnerID == userID
 }
 
 // ListNearby 處理 GET /api/v1/cases?lat=..&lng=..&radius_m=3000（公開，一律回傳模糊座標）。
@@ -198,12 +260,14 @@ func (h *CaseHandler) ListNearby(c *gin.Context) {
 
 	out := make([]gin.H, 0, len(cases))
 	for _, cs := range cases {
-		out = append(out, caseJSON(cs, false)) // 列表一律模糊座標；詳情頁才依權限決定
+		out = append(out, caseJSON(cs, false, h.isOwnerOf(c, cs))) // 列表一律模糊座標；詳情頁才依權限決定
 	}
 	c.JSON(http.StatusOK, gin.H{"cases": out})
 }
 
-func caseJSON(cs repository.Case, precise bool) gin.H {
+// caseJSON 把案件序列化成 API 回應。precise 控制座標是否精確（僅案主/認證志願者），
+// isOwner 告訴前端「這是不是我發的案件」（決定顯示結案按鈕）。
+func caseJSON(cs repository.Case, precise bool, isOwner bool) gin.H {
 	lng, lat := cs.PublicLng, cs.PublicLat
 	if precise {
 		lng, lat = cs.Lng, cs.Lat
@@ -223,6 +287,7 @@ func caseJSON(cs repository.Case, precise bool) gin.H {
 		"lng":              lng,
 		"lat":              lat,
 		"precise_location": precise, // 前端據此顯示「精確位置」或「大概區域」提示
+		"is_owner":         isOwner, // 前端據此顯示結案／狀態變更按鈕
 		"search_radius_m":  cs.SearchRadiusM,
 		"police_report_no": cs.PoliceReportNo,
 		"photo_url":        photoURL,

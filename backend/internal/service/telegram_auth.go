@@ -18,6 +18,7 @@ const maxAuthAge = 24 * time.Hour
 var (
 	ErrTelegramHashMismatch = errors.New("telegram: 簽章驗證失敗")
 	ErrTelegramDataTooOld   = errors.New("telegram: 登入資料已過期，請重新登入")
+	ErrTelegramInvalidData  = errors.New("telegram: 登入資料格式錯誤")
 	ErrTelegramMissingID    = errors.New("telegram: 缺少使用者 id")
 )
 
@@ -57,11 +58,16 @@ func VerifyTelegramLogin(fields map[string]string, botToken string) (telegramID 
 		return 0, "", ErrTelegramHashMismatch
 	}
 
-	if authDateStr := fields["auth_date"]; authDateStr != "" {
-		authDateUnix, convErr := strconv.ParseInt(authDateStr, 10, 64)
-		if convErr == nil && time.Since(time.Unix(authDateUnix, 0)) > maxAuthAge {
-			return 0, "", ErrTelegramDataTooOld
-		}
+	// auth_date 必須是要能解析的整數，且不能早於 maxAuthAge——兩者都是 replay
+	// 防護的一部分。解析失敗「不」放行：傳入 auth_date: "abc" 即可完全繞過時效
+	// 檢查的漏洞已修正（原本 convErr != nil 就直接跳過比較）。
+	authDateStr := fields["auth_date"]
+	authDateUnix, convErr := strconv.ParseInt(authDateStr, 10, 64)
+	if convErr != nil {
+		return 0, "", ErrTelegramInvalidData
+	}
+	if time.Since(time.Unix(authDateUnix, 0)) > maxAuthAge {
+		return 0, "", ErrTelegramDataTooOld
 	}
 
 	idStr := fields["id"]

@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -46,8 +47,11 @@ func extractUserID(c *gin.Context, auth *service.AuthService) (string, bool) {
 	}
 	userID, err := auth.UserIDForToken(c.Request.Context(), token)
 	if err != nil {
+		// Token 不存在（redis.Nil）是正常的未登入情境，不用記錄。但 Redis 連線
+		// 故障等其他錯誤會讓「已登入的使用者靜默變成 401」——那樣維運完全看不到
+		// 原因，所以一定要 log 出來。
 		if !errors.Is(err, redis.Nil) && !errors.Is(err, context.Canceled) {
-			// Redis 非預期錯誤：記錄由呼叫端 log 中介層處理，這裡單純視為未登入
+			log.Printf("WARN: auth token lookup failed: %v", err)
 		}
 		return "", false
 	}

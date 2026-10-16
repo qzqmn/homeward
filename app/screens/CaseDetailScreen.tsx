@@ -4,9 +4,10 @@ import * as ImagePicker from 'expo-image-picker';
 import MapView from '../lib/MapView';
 import { Button } from '../components/Button';
 import { StatusPill } from '../components/StatusPill';
-import { submitClue } from '../lib/api';
+import { listClues, submitClue, updateCaseStatus } from '../lib/api';
 import { getAuthToken } from '../lib/authStore';
-import type { Case } from '../lib/types';
+import { useAuth } from '../lib/useAuth';
+import type { Case, Clue } from '../lib/types';
 import { caseTypeLabel, color, radius, shadow, space, type as t } from '../theme/tokens';
 import { formatRelativeTime } from '../lib/format';
 
@@ -20,37 +21,46 @@ const typeEmoji: Record<Case['case_type'], string> = {
 export function CaseDetailScreen({
   item: initialItem,
   apiBaseUrl,
-  isLoggedIn,
   onBack,
   onRequireLogin,
 }: {
   item: Case;
   apiBaseUrl: string;
-  isLoggedIn: boolean;
   onBack: () => void;
   onRequireLogin: () => void;
 }) {
   const [item, setItem] = useState(initialItem);
+  const [clues, setClues] = useState<Clue[] | null>(null);
   const [reporting, setReporting] = useState(false);
   const [note, setNote] = useState('');
   const [photo, setPhoto] = useState<{ uri: string; blob: Blob } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitMessage, setSubmitMessage] = useState('');
+  const [closing, setClosing] = useState(false);
 
-  // 首頁清單一律回傳模糊座標；這裡用登入後的 token 重新查一次案件詳情——
-  // 如果是案主本人或已認證志願者，後端會改回傳精確座標並把 precise_location
-  // 設成 true，畫面上才看得出差別。查詢失敗就安靜維持原本的模糊版本。
+  // 登入狀態（含登入完成的即時變化）本頁自己訂閱：案主登入後要立刻重查
+  // 精確座標與線索列表，不需要重導路由。
+  const { token, user } = useAuth();
+
+  // 首頁清單一律回傳模糊座標；帶 token 重查一次，若是案主本人或已認證
+  // 志願者，後端會回傳精確座標；並在取得 is_owner 後拉線索列表。
   useEffect(() => {
-    const token = getAuthToken();
-    if (!token) return;
-    fetch(`${apiBaseUrl}/api/v1/cases/${initialItem.id}`, { headers: { Authorization: `Bearer ${token}` } })
+    const deps = { apiBaseUrl, getAuthToken };
+    fetch(`${apiBaseUrl}/api/v1/cases/${initialItem.id}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
       .then((res) => (res.ok ? (res.json() as Promise<Case>) : null))
       .then((data) => {
-        if (data) setItem(data);
+        if (!data) return;
+        setItem(data);
+        const canViewClues = data.is_owner || user?.verified_volunteer;
+        if (token && canViewClues) {
+          void listClues(initialItem.id, deps).then((cs) => setClues(cs));
+        }
       })
       .catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只需要在進入這個案件時查一次
-  }, [initialItem.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 進入案件/登入狀態變化時重查
+  }, [initialItem.id, token]);
 
   const pickPhoto = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7 });
@@ -75,6 +85,37 @@ export function CaseDetailScreen({
     setReporting(false);
     setNote('');
     setPhoto(null);
+    // 案主自己回報的線索：清單立即補上新的一筆（檢查完權限再拉）。
+    if (result.status === 'sent' && (item.is_owner || user?.verified_volunteer)) {
+      void listClues(item.id, { apiBaseUrl, getAuthToken }).then((cs) => setClues(cs));
+    }
+  };
+
+  const close = async (status: 'found' | 'closed') => {
+    setClosing(true);
+    const ok = await updateCaseStatus(item.id, status, { apiBaseUrl, getAuthToken });
+    setClosing(false);
+    if (ok) {
+      // 結案後還留在詳情頁（狀態就地更新），案主不會突然被丟回首頁找不到案件。
+      setItem({ ...item, status });
+      setSubmitMessage(status === 'found' ? '已標記為「已團聚」，太好了！' : '案件已結案');
+    } else {
+      setSubmitMessage('更新狀態失敗，請稍後再試');
+    }
+  };
+
+  const share = async () => {
+    const url = `${window.location.origin}/c/${item.id}`;
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: item.title, url });
+      } else {
+        await navigator.clipboard.writeText(url);
+        setSubmitMessage('連結已複製，貼到群組就能分享');
+      }
+    } catch {
+      setSubmitMessage(url); // 失敗時至少把網址顯示出來
+    }
   };
 
   return (
@@ -112,19 +153,42 @@ export function CaseDetailScreen({
         <MapView centerLng={item.lng} centerLat={item.lat} zoom={13} markers={[{ id: item.id, lng: item.lng, lat: item.lat }]} />
       </View>
 
+      {/* 案主操作：分享 + 狀態變更。狀態清單不再唱獨角戲——案主結案會即時生效。 */}
+      <View style={styles.ctaRow}>
+        <Button label="分享這個案件" variant="secondary" onPress={share} fullWidth />
+        {item.is_owner && item.status === 'open' ? (
+          <View style={styles.statusRow}>
+            <Button label="已團聚！" onPress={() => void close('found')} loading={closing} fullWidth />
+            <Button label="結案（停止搜尋）" variant="ghost" onPress={() => void close('closed')} loading={closing} fullWidth />
+          </View>
+        ) : null}
+      </View>
+
+      {/* 線索列表（僅案主/認證志願者）：主線「路人回報 → 案主看到」的完成端。 */}
+      {clues ? (
+        <View style={styles.clueSection}>
+          <Text style={styles.sectionLabel}>目擊線索（{clues.length}）</Text>
+          {clues.length === 0 ? (
+            <Text style={styles.clueEmpty}>還沒有人回報目擊。</Text>
+          ) : (
+            clues.map((clue) => (
+              <View key={clue.id} style={styles.clueItem}>
+                <Image source={{ uri: clue.photo_url }} style={styles.cluePhoto} />
+                <View style={styles.clueBody}>
+                  <Text style={styles.clueTime}>{formatRelativeTime(clue.sighted_at)}目擊</Text>
+                  {clue.note ? <Text style={styles.clueNote}>{clue.note}</Text> : null}
+                </View>
+              </View>
+            ))
+          )}
+        </View>
+      ) : null}
+
       {!reporting ? (
         <View style={styles.ctaRow}>
           <Button label="回報目擊" onPress={() => setReporting(true)} fullWidth />
-          <Button
-            label="我想當志願者搜索"
-            variant="secondary"
-            onPress={() =>
-              isLoggedIn
-                ? setSubmitMessage('已記錄你的意願，持續搜索追蹤功能開發中')
-                : onRequireLogin()
-            }
-            fullWidth
-          />
+          {/* 搜索志願者功能未實作：直白說明，不假裝「已記錄意願」。 */}
+          <Text style={styles.volunteerHint}>志願者搜索模式開發中，尚未開放報名。</Text>
         </View>
       ) : (
         <View style={styles.reportForm}>
@@ -173,6 +237,7 @@ const styles = StyleSheet.create({
   sectionHint: { ...t.caption, color: color.inkSoft, marginBottom: space.sm },
   mapBox: { height: 180, borderRadius: radius.lg, overflow: 'hidden', ...shadow.card },
   ctaRow: { gap: space.sm, marginTop: space.lg },
+  statusRow: { gap: space.sm },
   reportForm: { marginTop: space.sm, gap: space.sm },
   photoPicker: {
     height: 140,
@@ -197,5 +262,21 @@ const styles = StyleSheet.create({
     ...t.body,
     color: color.ink,
   },
+  clueSection: { marginTop: space.lg },
+  clueItem: {
+    flexDirection: 'row',
+    gap: space.md,
+    padding: space.md,
+    backgroundColor: color.surface,
+    borderRadius: radius.md,
+    marginTop: space.sm,
+    ...shadow.card,
+  },
+  cluePhoto: { width: 72, height: 72, borderRadius: radius.sm, backgroundColor: color.surfaceAlt },
+  clueBody: { flex: 1 },
+  clueTime: { ...t.caption, color: color.inkFaint },
+  clueNote: { ...t.body, color: color.ink, marginTop: space.xs },
+  clueEmpty: { ...t.bodyMedium, color: color.inkSoft, marginTop: space.sm },
+  volunteerHint: { ...t.caption, color: color.inkFaint, textAlign: 'center' },
   submitMessage: { ...t.bodyMedium, color: color.hope, marginTop: space.md, textAlign: 'center' },
 });

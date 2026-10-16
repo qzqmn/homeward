@@ -13,13 +13,16 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"homeward/internal/media"
 )
 
-// 只接受這三種圖片；以檔案內容（magic bytes）判斷，不信任客戶端給的副檔名。
+// 只接受這兩種圖片；以檔案內容（magic bytes）判斷，不信任客戶端給的副檔名。
+// 刻意「不」收 webp：Go 標準庫只能解碼 webp 無法編碼，無法用「重新編碼剝
+// metadata」的安全做法（webp 又常帶 EXIF chunk），寧可擋下也不放未處理的圖。
 var allowedTypes = map[string]string{
 	"image/jpeg": ".jpg",
 	"image/png":  ".png",
-	"image/webp": ".webp",
 }
 
 type PhotoHandler struct {
@@ -62,13 +65,22 @@ func (h *PhotoHandler) Upload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot read upload"})
 		return
 	}
-	ext, ok := allowedTypes[http.DetectContentType(head[:n])]
+	contentType := http.DetectContentType(head[:n])
+	ext, ok := allowedTypes[contentType]
 	if !ok {
-		c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "only jpeg/png/webp allowed"})
+		c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "only jpeg/png allowed"})
 		return
 	}
 	if _, err := src.Seek(0, io.SeekStart); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot read upload"})
+		return
+	}
+
+	// 重新編碼剝除 metadata：手機照片多帶 GPS 座標，而 /media/ 是公開目錄，
+	// 不剝除等於把 cases.public_center 特意模糊化掉的位置直接洩漏出去。
+	stripped, err := media.Strip(src, contentType)
+	if err != nil {
+		c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "invalid image content"})
 		return
 	}
 
@@ -91,7 +103,7 @@ func (h *PhotoHandler) Upload(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot write file"})
 		return
 	}
-	if _, err := io.Copy(out, src); err != nil {
+	if _, err := io.Copy(out, stripped); err != nil {
 		out.Close()
 		os.Remove(dst)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot write file"})

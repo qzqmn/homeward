@@ -3,6 +3,7 @@ import { Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 
 import * as ImagePicker from 'expo-image-picker';
 import MapView from '../lib/MapView';
 import { Button } from '../components/Button';
+import { createCase, uploadPhoto } from '../lib/api';
 import { getAuthToken } from '../lib/authStore';
 import { caseTypeLabel, color, radius, space, type as t } from '../theme/tokens';
 
@@ -43,25 +44,25 @@ export function ReportCaseScreen({
     setSubmitting(true);
     setMessage('');
     try {
+      const deps = { apiBaseUrl, getAuthToken };
+
+      // 上傳失敗要明說（選了照片却被靜默丟掉的事不可以再發生），但選填的
+      // 照片不會因此擋下發案。
       let photoPath: string | undefined;
       if (photo) {
-        const form = new FormData();
-        form.append('photo', photo.blob, 'photo.jpg');
-        const up = await fetch(`${apiBaseUrl}/api/v1/cases/upload-photo`, { method: 'POST', body: form });
-        if (up.ok) {
-          const data: { path: string } = await up.json();
-          photoPath = data.path;
+        try {
+          photoPath = await uploadPhoto(photo.blob, deps);
+        } catch (err) {
+          const message = err instanceof Error && err.message.includes('415')
+            ? '照片格式不支援（僅接受 JPEG/PNG），已改為不附照片發布'
+            : '照片上傳失敗，已改為不附照片發布';
+          setMessage(message);
         }
       }
 
-      const token = getAuthToken();
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (token) headers.Authorization = `Bearer ${token}`;
-
-      const res = await fetch(`${apiBaseUrl}/api/v1/cases`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
+      // 需要登入才送得出；401 時浮層登入不會清掉底下這個表單
+      const res = await createCase(
+        {
           case_type: caseType,
           title,
           description,
@@ -71,8 +72,9 @@ export function ReportCaseScreen({
           // 列表上就看不到「X 小時前」，配對演算法的時間比對也會失效。
           last_seen_at: new Date().toISOString(),
           photo_path: photoPath,
-        }),
-      });
+        },
+        deps,
+      );
 
       if (res.status === 401) {
         onRequireLogin();

@@ -145,6 +145,9 @@ func (h *AuthHandler) TelegramLogin(c *gin.Context) {
 	case errors.Is(err, service.ErrTelegramDataTooOld):
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "登入資料已過期，請重新登入"})
 		return
+	case errors.Is(err, service.ErrTelegramInvalidData):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid telegram login data"})
+		return
 	case err != nil:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid telegram login data"})
 		return

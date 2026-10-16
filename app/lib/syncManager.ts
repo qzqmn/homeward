@@ -11,7 +11,13 @@
  * 同一時間只允許一個 flush 在跑，避免多個觸發來源同時送出造成重複請求。
  */
 
-import { listPending, remove, recordAttemptFailed, type PendingItem } from './offlineQueue';
+import {
+  listPending,
+  remove,
+  recordAttemptFailed,
+  updatePayload,
+  type PendingItem,
+} from './offlineQueue';
 
 export interface SyncConfig {
   apiBaseUrl: string;
@@ -20,10 +26,13 @@ export interface SyncConfig {
   pollIntervalMs?: number;
   maxBackoffMs?: number;
   onQueueChange?: (pendingCount: number) => void;
+  /** 單一項目最多自動重試次數；到上限後停止自動重試（等使用者手動或網路更穩再說）。 */
+  maxAttempts?: number;
 }
 
 const DEFAULT_POLL_MS = 30_000;
 const DEFAULT_MAX_BACKOFF_MS = 5 * 60_000;
+const DEFAULT_MAX_ATTEMPTS = 12;
 
 /** 重試也不會成功的錯誤（例如照片格式不被接受 415、檔案太大 413）。 */
 class PermanentUploadError extends Error {}
@@ -32,12 +41,15 @@ export class SyncManager {
   private cfg: Required<Omit<SyncConfig, 'onQueueChange'>> & Pick<SyncConfig, 'onQueueChange'>;
   private flushing = false;
   private backoffMs = 1000;
+  /** 退避期間輪詢暫停的起始時間（retryNow 會解除）。0 = 沒有在退避。 */
+  private pausedUntil = 0;
   private pollTimer?: ReturnType<typeof setInterval>;
   private backoffTimer?: ReturnType<typeof setTimeout>;
   private started = false;
 
   constructor(cfg: SyncConfig) {
     this.cfg = {
+      maxAttempts: DEFAULT_MAX_ATTEMPTS,
       pollIntervalMs: DEFAULT_POLL_MS,
       maxBackoffMs: DEFAULT_MAX_BACKOFF_MS,
       ...cfg,
@@ -69,6 +81,7 @@ export class SyncManager {
   /** 供 UI 的「重新上傳」按鈕呼叫，並重置退避時間（使用者主動觸發，值得立即再試）。 */
   retryNow(): void {
     this.backoffMs = 1000;
+    this.pausedUntil = 0;
     void this.flush();
   }
 
@@ -77,6 +90,9 @@ export class SyncManager {
   };
 
   private handleTrigger = (): void => {
+    // 退避期間（連續失敗後）暫停 30 秒輪詢，否則指數退避會被固定輪詢抵銷，
+    // 等於每 30 秒照樣打一次後端。
+    if (Date.now() < this.pausedUntil) return;
     void this.flush();
   };
 
@@ -89,10 +105,15 @@ export class SyncManager {
       this.cfg.onQueueChange?.(items.length);
       if (items.length === 0) {
         this.backoffMs = 1000; // 佇列清空，重置退避
+        this.pausedUntil = 0;
         return;
       }
 
       for (const item of items) {
+        // 到重試次數上限的項目不再自動送（只會被手動重試觸發），避免持續 5xx
+        // 的單筆讓整個佇列永遠停在同一個位置。
+        if (item.attempts >= this.cfg.maxAttempts) continue;
+
         const ok = await this.sendOne(item);
         if (!ok) {
           this.scheduleBackoffRetry();
@@ -110,6 +131,7 @@ export class SyncManager {
   private scheduleBackoffRetry(): void {
     if (this.backoffTimer) clearTimeout(this.backoffTimer);
     this.backoffTimer = setTimeout(() => void this.flush(), this.backoffMs);
+    this.pausedUntil = Date.now() + this.backoffMs;
     this.backoffMs = Math.min(this.backoffMs * 2, this.cfg.maxBackoffMs);
   }
 
@@ -121,6 +143,9 @@ export class SyncManager {
       if (item.kind === 'clue' && item.photoBlob && !payload.photo_path) {
         const photoPath = await this.uploadPhoto(item.photoBlob);
         payload = { ...payload, photo_path: photoPath };
+        // 上傳成功就把 photo_path 寫回佇列，否則每次重試都會重新上傳同一張照片
+        // （孤兒檔案 + 弱網下重複傳大檔）。
+        await updatePayload(item.clientId, payload);
       }
 
       const path =
@@ -134,8 +159,14 @@ export class SyncManager {
         body: JSON.stringify({ ...payload, client_id: item.clientId }),
       });
 
-      // 4xx（例如驗證失敗）重送也不會成功，記錄錯誤後仍從佇列移除，避免卡住後面的項目；
-      // 5xx／網路錯誤則視為暫時性問題，保留在佇列裡等下次重試。
+      // 401/403（token 過期、還沒重新登入）重試「之後」會成功——使用者重新登入
+      // 或重新上線後這筆資料就不會丟了，所以保留在佇列中等下次重試（401 也會
+      // 讓 sync 停下來等退避，實際上就是把資料留著有新 token 後自動重送）。
+      // 其他 4xx（例如驗證失敗）重送也不會成功，記錄錯誤後從佇列移除避免卡死。
+      if (res.status === 401 || res.status === 403) {
+        await recordAttemptFailed(item.clientId, `HTTP ${res.status}（等待重新登入）`);
+        return false;
+      }
       if (!res.ok && res.status < 500) {
         await recordAttemptFailed(item.clientId, `HTTP ${res.status}`);
         return true;

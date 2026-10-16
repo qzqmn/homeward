@@ -114,6 +114,36 @@ func (r *CaseRepo) ListNearby(ctx context.Context, lng, lat float64, radiusM int
 	return out, rows.Err()
 }
 
+// ListByOwner 列出某位使用者建立的所有案件（含非 open）。
+// 與 GetByID 相同的 SELECT 欄位順序，讓 Scan 複用同一組欄位。
+func (r *CaseRepo) ListByOwner(ctx context.Context, ownerID string, limit int) ([]Case, error) {
+	const q = `
+		SELECT id::text, case_type, status, title, description, last_seen_at,
+		       ST_X(center), ST_Y(center), ST_X(public_center), ST_Y(public_center),
+		       search_radius_m, police_report_no, photo_path, owner_id::text, created_at
+		FROM cases
+		WHERE owner_id = $1::uuid
+		ORDER BY created_at DESC
+		LIMIT $2`
+	rows, err := r.db.Query(ctx, q, ownerID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Case
+	for rows.Next() {
+		var c Case
+		if err := rows.Scan(&c.ID, &c.CaseType, &c.Status, &c.Title, &c.Description, &c.LastSeenAt,
+			&c.Lng, &c.Lat, &c.PublicLng, &c.PublicLat,
+			&c.SearchRadiusM, &c.PoliceReportNo, &c.PhotoPath, &c.OwnerID, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // UpdateStatus 處理結案／標記尋回（PATCH /cases/:id 的底層邏輯）。
 func (r *CaseRepo) UpdateStatus(ctx context.Context, id, status string) error {
 	const q = `UPDATE cases SET status = $2, updated_at = now() WHERE id = $1::uuid`
@@ -129,6 +159,9 @@ func (r *CaseRepo) UpdateStatus(ctx context.Context, id, status string) error {
 
 type EscalationCandidate struct {
 	ID        string
+	CaseType  string
+	Title     string
+	PhotoPath *string
 	Lng, Lat  float64
 	CreatedAt time.Time
 }
@@ -137,7 +170,7 @@ type EscalationCandidate struct {
 // 供背景排程判斷是否該擴大半徑、通知更多關注該區域的使用者。
 func (r *CaseRepo) ListOpenMissingForEscalation(ctx context.Context) ([]EscalationCandidate, error) {
 	const q = `
-		SELECT id::text, ST_X(center), ST_Y(center), created_at
+		SELECT id::text, case_type, title, photo_path, ST_X(center), ST_Y(center), created_at
 		FROM cases
 		WHERE status = 'open' AND case_type IN ('missing_person', 'missing_pet')`
 	rows, err := r.db.Query(ctx, q)
@@ -149,7 +182,7 @@ func (r *CaseRepo) ListOpenMissingForEscalation(ctx context.Context) ([]Escalati
 	var out []EscalationCandidate
 	for rows.Next() {
 		var e EscalationCandidate
-		if err := rows.Scan(&e.ID, &e.Lng, &e.Lat, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.CaseType, &e.Title, &e.PhotoPath, &e.Lng, &e.Lat, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

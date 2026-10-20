@@ -44,4 +44,6 @@ jobs:
       - name: typecheck
         run: npx tsc --noEmit
       - name: lint
-        run: npx eslint App.tsx assets components lib screens theme index.ts
+        # assets/ 是圖示等靜態檔，eslint-config-expo 預設整個忽略它，
+        # 把它放進 lint 對象反而會讓 ESLint 直接報錯（all files ignored）。
+        run: npx eslint App.tsx components lib screens theme index.ts

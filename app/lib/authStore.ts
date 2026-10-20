@@ -11,6 +11,8 @@ export interface AuthUser {
   display_name: string;
   locale: string;
   verified_volunteer: boolean;
+  /** 管理者（users.role='admin'）；登入時由後端回傳，畫面以 GET /me 為準。 */
+  is_admin?: boolean;
 }
 
 interface AuthState {

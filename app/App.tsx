@@ -61,7 +61,6 @@ export default function App() {
         history.replaceState(null, '', window.location.pathname);
       }
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在啟動時解析一次網址
   }, []);
 
   const goHome = () => {
@@ -95,6 +94,12 @@ export default function App() {
             onBack={goHome}
             onRequireLogin={() => setLoginReturnTo(route)}
             onStartSearch={(cs) => openRoute({ name: 'search', item: cs })}
+            onOpenCase={(id) => {
+              // 配對建議跳轉：只拿到 id 時先拉一次案件（失敗就在原地，不打斷案主）。
+              void getCase(id, { apiBaseUrl: API_BASE_URL, getAuthToken }).then((cs) => {
+                if (cs) openRoute({ name: 'detail', item: cs });
+              });
+            }}
           />
         )}
         {route.name === 'search' && (

@@ -15,6 +15,7 @@ homeward/
 │   └── migrations/              # 000001 初始表 / 000002 geography 索引 / 000003 users 與擴充 /
 │   │                             # 000004 流程表 / 000005 封面照＋關注區域＋通知去重
 │   │                             # 000007 通知多渠道唯一索引修正（每渠道一筆）＋FK 索引
+│   │                             # 000008 志願者申請欄位（volunteer_requested_at）
 ├── backend/                     # Go API
 │   ├── Dockerfile
 │   ├── cmd/server/main.go
@@ -30,6 +31,9 @@ homeward/
 ```
 
 ## CI/CD：GitHub Actions → GHCR → VPS 拉取
+`.github/workflows/ci.yml` 在每次 push 時先跑測試（backend：`go vet`/`go build`/`go test`；
+frontend：`tsc --noEmit` + eslint），不過才不會浪費建置時間。正式建置由
+`.github/workflows/build.yml` 做：
 1. 建立 GitHub 倉庫並推送：
    ```bash
    git init -b main && git add . && git commit -m "init"
@@ -66,6 +70,11 @@ ls -ln /mnt/nas | grep homeward-media  # 確認 NAS 目錄存在且該 UID 可�
 不是示意骨架。詳細說明、已知限制見 `app/README.md`。CI 偵測到 `app/package.json`
 存在時會自動執行匯出並打包進 `homeward-frontend` 映像（見上面的 CI/CD 段落）。
 
+PWA 外殼由 `public/sw.js` 提供：只快取靜態資源（bundle/字型/圖示），頁面導航 network-first，
+API 與 `/media/*` 一律不快取（案件狀態有時效性）；離線送出的線索/軌跡靠 app 內建的
+IndexedDB 佇列，不靠 SW。桌面瀏覽器（≥760px）會用置中響應式卡片版面，
+首頁自動切成「地圖 + 清單」雙欄。
+
 ## API 一覽（`/api/v1`）
 | 方法/路徑 | 說明 | 認證 |
 |---|---|---|
@@ -74,13 +83,22 @@ ls -ln /mnt/nas | grep homeward-media  # 確認 NAS 目錄存在且該 UID 可�
 | `POST /auth/otp/request` | 發送手機 OTP（每 IP 5 次/分鐘；後端已就緒，前端尚未使用） | 無 |
 | `POST /auth/otp/verify` | 驗證 OTP，回傳登入 token（同上） | 無 |
 | `POST /me/watch-area` | 設定「關注區域」（住家/常去地點），供半徑推播比對 | 需登入 |
+| `GET /me` | 目前使用者狀態（是否已認證志願者／申請中／管理員） | 需登入 |
 | `POST /me/channels` | 註冊通知渠道（web_push/telegram/whatsapp/email） | 需登入 |
+| `POST /me/volunteer-request` | 申請成為認證志願者（冪等；管理員審核後開放權限） | 需登入 |
 | `POST /cases` | 建立案件（附 `photo_path` 作封面照；會觸發配對比對與通知排程） | 需登入 |
 | `GET /cases?lat=&lng=&radius_m=` | 附近案件（回傳模糊座標） | 無 |
 | `GET /cases/:id` | 案件詳情（本人或認證志願者可看精確座標） | 選填 |
 | `PATCH /cases/:id/status` | 結案／標記已團聚（`open`/`found`/`closed`） | 僅案主 |
 | `POST /cases/:id/clues` | 提交線索（`client_id` 冪等，支援離線重送；每 IP 10 次/分鐘） | 選填 |
 | `GET /cases/:id/clues` | 案件的目擊線索列表（僅案主本人或認證志願者可看） | 需登入 |
+| `PATCH /cases/:id/clues/:clueId/status` | 案主審核線索（`credible`/`dismissed`/`pending` 撤銷） | 僅案主 |
+| `GET /cases/:id/updates` | 案件時間軸（建立/線索/審核/結案等事件，案主與志願者可看） | 需登入 |
+| `POST /reports` | 舉報案件／線索／使用者（詐騙/騷擾/隱私/垃圾；每 IP 5 次/分鐘） | 需登入 |
+| `GET /admin/volunteer-requests` | 志願者申請清單 | 僅管理員 |
+| `POST /admin/volunteer-requests/:userId` | 通過／撤銷志願者認證 | 僅管理員 |
+| `GET /admin/reports` | 未處理完結的舉報清單 | 僅管理員 |
+| `PATCH /admin/reports/:id` | 處理舉報（`reviewing`/`actioned`/`dismissed`） | 僅管理員 |
 | `GET /me/cases` | 「我的案件」清單（**含已結案的**，案主結案後找得到自己發過的案子） | 需登入 |
 | `POST /cases/:id/tracks` | 上報志願者軌跡點（`client_id` 冪等） | 需登入 |
 | `GET /cases/:id/coverage` | 搜索覆蓋熱圖（軌跡依格網聚合） | 無 |
@@ -89,12 +107,27 @@ ls -ln /mnt/nas | grep homeward-media  # 確認 NAS 目錄存在且該 UID 可�
 | `POST /cases/upload-photo` | 上傳照片（**僅接受 JPEG/PNG**；上傳時重新編碼剝除 EXIF→GPS 座標不會外洩。每 IP 10 次/分鐘。上傳後 72 小時未被任何案件/線索引用的檔案會被背景清理） | 無 |
 | `GET /c/:id`（根路徑，非 `/api/v1`） | 分享預覽頁：給 WhatsApp/Facebook/Telegram 爬蟲讀 OG meta，真人點擊會自動轉去 PWA | 無 |
 
-尚未實作：案件時間軸（`case_updates`）、舉報處理（`reports`）、SOS（`sos_events`）——
-資料表已在 migration 建好，仍需要對應的 handler／畫面。
+尚未實作：SOS（`sos_events`）——資料表已在 migration 建好，仍需要對應的 handler／畫面。
+（時間軸、舉報、志願者申請/審核、配對建議畫面均已補上，見下與 API 一覽。）
 
 主線「發案 → 路人回報線索 → 案主收通知並看到線索 → 結案」已打通：
 案主會在 `GET /me/cases` 看到自己的案件、詳情頁可看線索列表與結案按鈕、
 分享連結會直達詳情頁。線索與封面照片可點開全螢幕檢視。
+
+每次案件事件的完整紀錄會寫進 `case_updates`（案件時間軸）：建案、有人回報線索、
+案主審核線索（可信/排除）、狀態變更（團聚/結案）——詳情頁案主與認證志願者可以回看。
+
+### 志願者申請與審核
+認證志願者才能看精確位置、案件時間軸與所有案件的線索列表。任何人登入後可在
+「我的帳號」按「申請認證」（冪等，`POST /me/volunteer-request` 只登記意願）；
+帳號設為 `users.role='admin'` 的使用者登入後，會在同一頁看到「志願者審核」區塊，
+通過（或撤銷）設定 `users.volunteer_verified_at`。撤銷會一併清掉申請記錄，
+對方要重新申請才會再出現在清單上。
+
+### 舉報處理
+登入使用者可以在案件詳情頁舉報詐騙／騷擾／隱私／垃圾內容（每 IP 5 次/分鐘，
+目標必須真實存在）。管理員在「我的帳號」可看到待處理的舉報並標記
+`reviewing`／`actioned`（已處理，例如下架案件）／`dismissed`（查無不法）。
 
 ### 志願者搜索模式
 詳情頁「開始搜索（志願者模式）」→ 搜索畫面：登入使用者以瀏覽器 Geolocation
@@ -103,9 +136,16 @@ ls -ln /mnt/nas | grep homeward-media  # 確認 NAS 目錄存在且該 UID 可�
 避免志願者重複搜索同一區。開啟時用 Screen Wake Lock 讓螢幕常亮；
 離開畫面立即停止記錄。PWA 需以 HTTPS 提供才能使用定位。
 
+### 志願者軌跡保留期限
+搜索模式的軌跡點屬個人位置資料：背景排程（`internal/service/worker.go` 的
+`RunTrackRetentionLoop`，每小時跑一次）會把「已團聚（found）/已結案（closed）」
+且距結案滿 14 天（可用 `TRACK_RETENTION_DAYS` 覆寫）的案件軌跡刪除——
+結案後軌跡失去工具價值，留著只是風險。
+
 ### 配對（撿到 ↔ 走失）
 建案時（任何類型）會自動比對「類型相對」（`missing_pet`↔`found_pet` 等）、5 公里內、
-14 天內的開放案件，寫入 `case_matches`，由案主在 `GET /cases/:id/matches` 自行確認或排除——
+14 天內的開放案件，寫入 `case_matches`。配對建議的畫面在案主點開自己案件的詳情頁：
+每筆建議可點去看對方案件、按「就是這個」（confirmed）或「不是」（rejected）結案存檔。
 系統**不會**自動判定「已團聚」。評分規則很陽春（距離 60% + 時間 40%），之後可以加品種/
 特徵文字比對或照片相似度，見 `internal/service/matching.go` 的註解。
 
@@ -236,7 +276,8 @@ curl -sI http://localhost:48180/ | head -1                           # 主機自
 - `cases.public_center` 是自動吸附到約 550m 格網的公開位置；API 對外只能回傳它，`center` 僅限案主與認證志願者（`users.volunteer_verified_at IS NOT NULL`）。
 - 離線重送：客戶端為每筆線索/軌跡產生 `client_id`（UUID），後端以 `ON CONFLICT (client_id) DO NOTHING` 保證重送不重複。
 - 上傳照片會在後端重新編碼剝除 EXIF（含 GPS），公開的 `/media/` 不會洩漏拍攝位置（`app/` 端挑的照片若是 WebP 會被拒收）。
-- 志願者軌跡屬個人資料：需在開啟「搜索模式」時顯示收集聲明，並訂定保留期限（結案後定期刪除）。
+- 志願者軌跡屬個人資料：搜索模式開啟時顯示收集聲明，且結案滿 14 天後由背景排程
+  自動刪除（`TRACK_RETENTION_DAYS` 可調，見「志願者軌跡保留期限」）。
 - `users.watch_center` 同樣是個人資料（間接透露住家/常去地點），只用於半徑推播比對，
   API 不會把它回傳給除本人以外的任何人；使用者應該能隨時清除（目前還沒有對應的
   「清除關注區域」endpoint，是已知缺口）。

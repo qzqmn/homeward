@@ -6,7 +6,9 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -16,6 +18,16 @@ import (
 	"homeward/internal/router"
 	"homeward/internal/service"
 )
+
+// getenvInt 跟 config.GetenvInt 一樣的簡單環境變數取值（天數）。
+func getenvInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return def
+}
 
 func main() {
 	cfg := config.Load()
@@ -58,6 +70,10 @@ func main() {
 
 	// 背景排程：孤兒照片清理（上傳 72h 未被引用即刪）。
 	go service.RunMediaGCLoop(ctx, cfg.MediaDir, repository.NewMediaRepo(pg))
+
+	// 背景排程：已結案案件的志願者軌跡保留期限（TRACK_RETENTION_DAYS，預設 14 天）。
+	go service.RunTrackRetentionLoop(ctx, repository.NewTrackRepo(pg),
+		time.Duration(getenvInt("TRACK_RETENTION_DAYS", 14))*24*time.Hour)
 
 	go func() {
 		log.Printf("homeward api listening on %s (media dir: %s)", srv.Addr, cfg.MediaDir)

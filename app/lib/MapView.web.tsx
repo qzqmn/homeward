@@ -83,9 +83,11 @@ export default function MapView({
   const markersRef = useRef<Map<string, Marker>>(new Map());
   const circlesRef = useRef<Map<string, Marker>>(new Map());
   // 用 ref 存最新的 callback：地圖只建立一次，但 onMapPress 可能每次 render 都是新的函式參照，
-  // 用 ref 避免因此重新綁定事件監聽器（或把舊的閉包鎖死）。
+  // 用 ref 避免因此重新綁定事件監聽器（或把舊的閉包鎖死）。ref 的更新放 effect，不在 render 期間動。
   const onMapPressRef = useRef(onMapPress);
-  onMapPressRef.current = onMapPress;
+  useEffect(() => {
+    onMapPressRef.current = onMapPress;
+  }, [onMapPress]);
 
   // 地圖只在掛載時建立一次；中心點/縮放改變由下面的 effect 用 flyTo 處理，
   // 避免每次 props 變動就整個重建地圖（會造成閃爍與多餘的網路請求）。

@@ -96,3 +96,19 @@ func (r *ClueRepo) ListByCase(ctx context.Context, caseID string, limit int) ([]
 	}
 	return out, rows.Err()
 }
+
+// SetStatus 更新線索狀態（pending → credible/dismissed），同時確認該線索
+// 確實屬於指定案件（WHERE 帶 case_id，避免跨案件改線索）。
+// 傳回受影響列數為 0 時的 ErrNotFound，呼叫端（handler）可對應 404。
+func (r *ClueRepo) SetStatus(ctx context.Context, caseID, clueID, status string) error {
+	const q = `
+		UPDATE clues SET status = $3 WHERE id = $2::uuid AND case_id = $1::uuid`
+	tag, err := r.db.Exec(ctx, q, caseID, clueID, status)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

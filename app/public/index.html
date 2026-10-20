@@ -8,7 +8,7 @@
 
     <!-- PWA：讓瀏覽器知道可以「加到主畫面」、全螢幕獨立視窗啟動 -->
     <link rel="manifest" href="/manifest.json" />
-    <meta name="theme-color" content="#e5484d" />
+    <meta name="theme-color" content="#e88a2d" />
 
     <!-- iOS Safari 不吃 manifest.json 的大部分欄位，「加到主畫面」要另外靠這幾個標籤 -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -43,5 +43,17 @@
     </noscript>
     <!-- The root element for your Expo app. -->
     <div id="root"></div>
+    <!-- PWA：註冊 Service Worker（快取靜態外殼而已；API/媒體一律走網路，
+         離線送出的線索/軌跡由 app 內建的 IndexedDB 佇列處理） -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+          navigator.serviceWorker.register('/sw.js').catch(function () {
+            // SW 註冊失敗不影響一般使用（例如 file:// 或私密瀏覽模式）：
+            // 只少掉離線外殼，app 主流程完全照常。
+          });
+        });
+      }
+    </script>
   </body>
 </html>

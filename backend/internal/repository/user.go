@@ -11,12 +11,14 @@ import (
 )
 
 type User struct {
-	ID                  string
-	PhoneE164           *string // 選填：可以只用 Telegram 登入，不一定有手機號碼
-	TelegramID          *int64  // 選填：可以只用手機 OTP 登入，不一定連過 Telegram
-	DisplayName         string
-	Locale              string
-	VolunteerVerifiedAt *time.Time // NULL 表示未認證志願者；非 NULL 才可查看案件精確位置
+	ID                   string
+	PhoneE164            *string // 選填：可以只用 Telegram 登入，不一定有手機號碼
+	TelegramID           *int64  // 選填：可以只用手機 OTP 登入，不一定連過 Telegram
+	DisplayName          string
+	Locale               string
+	Role                 string     // 'user' | 'admin'（志願者審核後台用 admin）
+	VolunteerVerifiedAt  *time.Time // NULL 表示未認證志願者；非 NULL 才可查看案件精確位置
+	VolunteerRequestedAt *time.Time // 使用者申請成為志願者的時間（管理員審核清單用）
 }
 
 type UserRepo struct{ db *pgxpool.Pool }
@@ -31,10 +33,10 @@ func (r *UserRepo) UpsertByPhone(ctx context.Context, phoneE164 string) (User, e
 	const q = `
 		INSERT INTO users (phone_e164) VALUES ($1)
 		ON CONFLICT (phone_e164) DO UPDATE SET phone_e164 = EXCLUDED.phone_e164
-		RETURNING id::text, phone_e164, telegram_id, display_name, locale, volunteer_verified_at`
+		RETURNING id::text, phone_e164, telegram_id, display_name, locale, role, volunteer_verified_at, volunteer_requested_at`
 	var u User
 	err := r.db.QueryRow(ctx, q, phoneE164).
-		Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.DisplayName, &u.Locale, &u.VolunteerVerifiedAt)
+		Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.DisplayName, &u.Locale, &u.Role, &u.VolunteerVerifiedAt, &u.VolunteerRequestedAt)
 	return u, err
 }
 
@@ -44,19 +46,19 @@ func (r *UserRepo) UpsertByTelegramID(ctx context.Context, telegramID int64, dis
 	const q = `
 		INSERT INTO users (telegram_id, display_name) VALUES ($1, $2)
 		ON CONFLICT (telegram_id) DO UPDATE SET telegram_id = EXCLUDED.telegram_id
-		RETURNING id::text, phone_e164, telegram_id, display_name, locale, volunteer_verified_at`
+		RETURNING id::text, phone_e164, telegram_id, display_name, locale, role, volunteer_verified_at, volunteer_requested_at`
 	var u User
 	err := r.db.QueryRow(ctx, q, telegramID, displayName).
-		Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.DisplayName, &u.Locale, &u.VolunteerVerifiedAt)
+		Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.DisplayName, &u.Locale, &u.Role, &u.VolunteerVerifiedAt, &u.VolunteerRequestedAt)
 	return u, err
 }
 
 func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
-	const q = `SELECT id::text, phone_e164, telegram_id, display_name, locale, volunteer_verified_at
+	const q = `SELECT id::text, phone_e164, telegram_id, display_name, locale, role, volunteer_verified_at, volunteer_requested_at
 	           FROM users WHERE id = $1::uuid AND deleted_at IS NULL`
 	var u User
 	err := r.db.QueryRow(ctx, q, id).
-		Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.DisplayName, &u.Locale, &u.VolunteerVerifiedAt)
+		Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.DisplayName, &u.Locale, &u.Role, &u.VolunteerVerifiedAt, &u.VolunteerRequestedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
@@ -65,6 +67,81 @@ func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
 
 // IsVerifiedVolunteer 用於判斷是否可查看案件的精確座標。
 func (u User) IsVerifiedVolunteer() bool { return u.VolunteerVerifiedAt != nil }
+
+// RequestVolunteer 記錄使用者想成為認證志願者的時間。冪等：重複申請不報錯，
+// 也不會覆蓋已有時間（保留最早的申請時間方便管理員排序審核）。
+func (r *UserRepo) RequestVolunteer(ctx context.Context, userID string) error {
+	const q = `
+		UPDATE users
+		SET volunteer_requested_at = coalesce(volunteer_requested_at, now())
+		WHERE id = $1::uuid AND deleted_at IS NULL`
+	tag, err := r.db.Exec(ctx, q, userID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// VolunteerCandidate 是審核清單的一列：提出申請的使用者與其當前狀態。
+type VolunteerCandidate struct {
+	ID                   string
+	DisplayName          string
+	TelegramID           *int64
+	PhoneE164            *string
+	VolunteerVerifiedAt  *time.Time
+	VolunteerRequestedAt time.Time
+}
+
+// ListVolunteerRequests 列出曾申請成為志願者的使用者（未刪除帳號），
+// 申請時間新的排前面；管理員據 telegram_id / display_name 判斷是否放行。
+func (r *UserRepo) ListVolunteerRequests(ctx context.Context, limit int) ([]VolunteerCandidate, error) {
+	const q = `
+		SELECT id::text, display_name, telegram_id, phone_e164, volunteer_verified_at, volunteer_requested_at
+		FROM users
+		WHERE volunteer_requested_at IS NOT NULL AND deleted_at IS NULL
+		ORDER BY volunteer_requested_at DESC
+		LIMIT $1`
+	rows, err := r.db.Query(ctx, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []VolunteerCandidate
+	for rows.Next() {
+		var c VolunteerCandidate
+		if err := rows.Scan(&c.ID, &c.DisplayName, &c.TelegramID, &c.PhoneE164, &c.VolunteerVerifiedAt, &c.VolunteerRequestedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// SetVolunteerVerified 授予／撤銷志願者認證（volunteer_verified_at 非空即可看
+// 精確位置與線索列表——這是整個平台的權限核心，務必只從 admin API 呼叫）。
+func (r *UserRepo) SetVolunteerVerified(ctx context.Context, userID string, verified bool) error {
+	var q string
+	if verified {
+		q = `UPDATE users SET volunteer_verified_at = now(), volunteer_requested_at = coalesce(volunteer_requested_at, now())
+		     WHERE id = $1::uuid AND deleted_at IS NULL`
+	} else {
+		// 撤銷：同時清掉申請時間，審核清單不再列出（除非重新申請）
+		q = `UPDATE users SET volunteer_verified_at = NULL, volunteer_requested_at = NULL
+		     WHERE id = $1::uuid AND deleted_at IS NULL`
+	}
+	tag, err := r.db.Exec(ctx, q, userID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
 
 // SetWatchArea 設定使用者的「關注區域」：用於半徑推播比對（誰該收到「附近有案件」通知），
 // 與 volunteer_tracks（搜索當下的即時軌跡）是不同用途，不會互相影響。

@@ -4,7 +4,16 @@
  */
 
 import { enqueue, newClientId } from './offlineQueue';
-import type { Case, Clue, CoverageCell } from './types';
+import type {
+  Case,
+  CaseUpdate,
+  Clue,
+  CoverageCell,
+  MatchSuggestion,
+  MeInfo,
+  ReportRecord,
+  VolunteerRequest,
+} from './types';
 import type { CaseStatus } from '../theme/tokens';
 
 export interface SubmitClueInput {
@@ -182,8 +191,7 @@ export async function updateCaseStatus(caseId: string, status: CaseStatus, deps:
 }
 
 /** 上傳照片，回傳要寫進 clue/createCase 的 photo_path；失敗擲出（呼叫端決定要不要佇列）。 */
-export async function uploadPhoto(blob: Blob, deps: SubmitDeps): Promise<string> {
-  const form = new FormData();
+export async function uploadPhoto(blob: Blob, deps: SubmitDeps): Promise<string> {  const form = new FormData();
   form.append('photo', blob, 'photo.jpg');
   const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/upload-photo`, {
     method: 'POST',
@@ -193,6 +201,175 @@ export async function uploadPhoto(blob: Blob, deps: SubmitDeps): Promise<string>
   if (!res.ok) throw new Error(`upload-photo failed: HTTP ${res.status}`);
   const data: { path: string } = await res.json();
   return data.path;
+}
+
+// ---- 帳號 / 志願者（GET /me、志願者申請）----
+
+/** 目前使用者狀態（誌願者/管理員）；401 或網路錯誤回 null。 */
+export async function getMe(deps: SubmitDeps): Promise<MeInfo | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/me`, { headers: authOnlyHeaders(deps) });
+    if (!res.ok) return null;
+    return (await res.json()) as MeInfo;
+  } catch {
+    return null;
+  }
+}
+
+/** 申請成為認證志願者（冪等）；成功回 true。 */
+export async function requestVolunteer(deps: SubmitDeps): Promise<boolean> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/me/volunteer-request`, {
+      method: 'POST',
+      headers: authOnlyHeaders(deps),
+    });
+    return res.ok || res.status === 409; // 已是志願者也視為成功
+  } catch {
+    return false;
+  }
+}
+
+// ---- 案件時間軸 / 線索審核 / 配對建議（案主或志願者）----
+
+/** 案件時間軸；403（非案主/志願者）回 null。 */
+export async function listUpdates(caseId: string, deps: SubmitDeps): Promise<CaseUpdate[] | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${caseId}/updates`, {
+      headers: authOnlyHeaders(deps),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { updates: CaseUpdate[] };
+    return data.updates;
+  } catch {
+    return null;
+  }
+}
+
+/** 案主審核線索：credible / dismissed / pending（撤銷誤按）；成功回 true。 */
+export async function reviewClue(caseId: string, clueId: string, status: string, deps: SubmitDeps): Promise<boolean> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${caseId}/clues/${clueId}/status`, {
+      method: 'PATCH',
+      headers: jsonHeaders(deps),
+      body: JSON.stringify({ status }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** 配對建議清單（僅案主）；403 回 null。 */
+export async function listMatches(caseId: string, deps: SubmitDeps): Promise<MatchSuggestion[] | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${caseId}/matches`, {
+      headers: authOnlyHeaders(deps),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { matches: MatchSuggestion[] };
+    return data.matches;
+  } catch {
+    return null;
+  }
+}
+
+/** 案主確認（confirmed）或排除（rejected）一筆配對建議；成功回 true。 */
+export async function updateMatchStatus(
+  caseId: string,
+  matchedCaseId: string,
+  status: 'confirmed' | 'rejected',
+  deps: SubmitDeps,
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${caseId}/matches/${matchedCaseId}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(deps),
+      body: JSON.stringify({ status }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ---- 舉報（登入使用者）----
+
+/** 回報詐騙/騷擾/垃圾內容；成功回 true。sameReason 詳細說明最多 1000 字。 */
+export async function createReport(
+  targetType: 'case' | 'clue' | 'user',
+  targetId: string,
+  reason: 'scam' | 'harassment' | 'privacy' | 'spam' | 'other',
+  detail: string,
+  deps: SubmitDeps,
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/reports`, {
+      method: 'POST',
+      headers: jsonHeaders(deps),
+      body: JSON.stringify({ target_type: targetType, target_id: targetId, reason, detail }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ---- 管理員審核（role='admin'）----
+
+export async function adminListVolunteerRequests(deps: SubmitDeps): Promise<VolunteerRequest[] | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/volunteer-requests`, {
+      headers: authOnlyHeaders(deps),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { requests: VolunteerRequest[] };
+    return data.requests;
+  } catch {
+    return null;
+  }
+}
+
+export async function adminVerifyVolunteer(userId: string, verified: boolean, deps: SubmitDeps): Promise<boolean> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/volunteer-requests/${userId}`, {
+      method: 'POST',
+      headers: jsonHeaders(deps),
+      body: JSON.stringify({ verified }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function adminListReports(deps: SubmitDeps): Promise<ReportRecord[] | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/reports`, {
+      headers: authOnlyHeaders(deps),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { reports: ReportRecord[] };
+    return data.reports;
+  } catch {
+    return null;
+  }
+}
+
+export async function adminUpdateReportStatus(
+  reportId: number,
+  status: 'reviewing' | 'actioned' | 'dismissed',
+  deps: SubmitDeps,
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/reports/${reportId}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(deps),
+      body: JSON.stringify({ status }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 function jsonHeaders(deps: SubmitDeps): HeadersInit {

@@ -39,6 +39,23 @@ type CoverageCell struct {
 	LastVisited time.Time
 }
 
+// DeleteForClosedCases 刪掉「已結案/已團聚」案件在 before 時間之前的軌跡。
+// 軌跡屬個人位置資料，隱私上應該有保留期限：案件結束後 N 天即失去工具價值，
+// 留著只是風險（README 隱私政策明白承諾會清理）。回傳刪除列數。
+func (r *TrackRepo) DeleteForClosedCases(ctx context.Context, before time.Time) (int64, error) {
+	const q = `
+		DELETE FROM volunteer_tracks t
+		USING cases c
+		WHERE t.case_id = c.id
+		  AND c.status IN ('found', 'closed')
+		  AND c.updated_at < $1`
+	tag, err := r.db.Exec(ctx, q, before)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // CoverageGrid 把某案件的志願者軌跡聚合成格網熱圖：每格回傳中心點座標、
 // 軌跡點數量（可粗略反映搜索密度）、以及最後一次有人經過的時間（幾小時前搜過 vs. 幾天前）。
 // cellSizeDeg 建議 0.001（約 100 公尺見方）；範圍太大時可以放大格子避免回傳過多格。

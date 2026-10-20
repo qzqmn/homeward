@@ -40,3 +40,51 @@ export interface CoverageCell {
   point_count: number;
   last_visited: string;
 }
+
+/** 對應後端 GET /api/v1/cases/:id/updates（案主/認證志願者可看）的一筆時間軸事件。 */
+export interface CaseUpdate {
+  id: number;
+  kind: string; // note / status_change / clue / sighting / match / system
+  body: string;
+  created_at: string;
+}
+
+/** 對應後端 GET /api/v1/cases/:id/matches（僅案主）的一筆配對建議。 */
+export interface MatchSuggestion {
+  matched_case_id: string;
+  score: number;
+  status: string; // suggested / confirmed / rejected
+  title: string;
+  case_type: string;
+  lng: number; // 一律模糊座標（配對是建議，不代表已確認）
+  lat: number;
+}
+
+/** 對應後端 GET /api/v1/admin/volunteer-requests 的一筆申請。 */
+export interface VolunteerRequest {
+  id: string;
+  display_name: string | null;
+  contact: string;
+  verified: boolean;
+  requested_at: string;
+}
+
+/** 對應後端 GET /api/v1/admin/reports 的一筆舉報。 */
+export interface ReportRecord {
+  id: number;
+  target_type: string;
+  target_id: string;
+  reason: string;
+  detail: string;
+  status: string;
+  created_at: string;
+}
+
+/** 對應後端 GET /api/v1/me 的回傳形狀（志願者/管理員狀態查詢用）。 */
+export interface MeInfo {
+  id: string;
+  display_name: string | null;
+  verified_volunteer: boolean;
+  volunteer_requested: boolean;
+  is_admin: boolean;
+}

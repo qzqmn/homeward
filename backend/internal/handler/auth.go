@@ -88,6 +88,7 @@ func (h *AuthHandler) VerifyOTP(c *gin.Context) {
 			"display_name":       user.DisplayName,
 			"locale":             user.Locale,
 			"verified_volunteer": user.IsVerifiedVolunteer(),
+			"is_admin":           user.Role == "admin",
 		},
 	})
 }
@@ -176,6 +177,7 @@ func (h *AuthHandler) TelegramLogin(c *gin.Context) {
 			"display_name":       user.DisplayName,
 			"locale":             user.Locale,
 			"verified_volunteer": user.IsVerifiedVolunteer(),
+			"is_admin":           user.Role == "admin",
 		},
 	})
 }

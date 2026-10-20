@@ -39,6 +39,9 @@ export function useNearbyCases(apiBaseUrl: string, lng: number, lat: number, rad
   }, [apiBaseUrl, lng, lat, radiusM]);
 
   useEffect(() => {
+    // setState 在 effect 內是資料載入的固有模式（無 query 庫可用的選擇）；
+    // 規則偵測的是同步呼叫鏈，用 macro 關掉這一行即可，行為不變。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
   }, [load]);
 

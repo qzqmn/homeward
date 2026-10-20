@@ -19,9 +19,10 @@ import (
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // photoPathRe 驗證 photo_path 必須是 upload-photo 回傳的相對路徑格式
-// （YYYY/MM/32hex.jpg｜png）。客戶端字串一律先過這關，防止引用任意（甚至別人的）
-// 媒體檔案當封面照。body 驗證屬 handler 職責，不只在 repository 擋 SQL injection。
-var photoPathRe = regexp.MustCompile(`^[0-9]{4}/[0-9]{2}/[0-9a-f]{32}\.(jpg|png)$`)
+// （YYYY/MM/32hex.jpg｜png，月 01-12）。客戶端字串一律先過這關，防止引用
+// 任意（甚至別人的）媒體檔案當封面照。body 驗證屬 handler 職責，不只在
+// repository 擋 SQL injection。
+var photoPathRe = regexp.MustCompile(`^[0-9]{4}/(0[1-9]|1[0-2])/[0-9a-f]{32}\.(jpg|png)$`)
 
 const (
 	maxTitleLen       = 100
@@ -34,6 +35,7 @@ type CaseHandler struct {
 	Users    *repository.UserRepo
 	Matching *service.MatchingService
 	Notify   *service.NotifyService
+	Updates  *repository.UpdateRepo // 案件時間軸（nil 時跳過，方便測試）
 }
 
 var validCaseStatuses = map[string]bool{"open": true, "found": true, "closed": true}
@@ -125,6 +127,12 @@ func (h *CaseHandler) Create(c *gin.Context) {
 	}
 
 	// 建立者一律看得到精確座標（自己的案件）
+	// 時間軸第一筆：案件建立（kind=system，author=案主）
+	if h.Updates != nil {
+		if err := h.Updates.Add(c.Request.Context(), created.ID, &userID, "system", "案件建立，開始搜尋"); err != nil {
+			log.Printf("WARN: case_updates add create event: %v", err)
+		}
+	}
 	c.JSON(http.StatusCreated, caseJSON(created, true, true))
 }
 
@@ -164,6 +172,18 @@ func (h *CaseHandler) UpdateStatus(c *gin.Context) {
 	if err := h.Cases.UpdateStatus(c.Request.Context(), id, body.Status); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update status"})
 		return
+	}
+
+	// 狀態變更寫入時間軸（案主看得到完整過程）
+	if h.Updates != nil {
+		label := map[string]string{
+			"open":   "恢復搜尋",
+			"found":  "標記為已團聚！",
+			"closed": "結案，停止搜尋",
+		}[body.Status]
+		if err := h.Updates.Add(c.Request.Context(), id, &userID, "status_change", label); err != nil {
+			log.Printf("WARN: case_updates add status event: %v", err)
+		}
 	}
 	c.Status(http.StatusNoContent)
 }

@@ -15,10 +15,11 @@ import (
 )
 
 type ClueHandler struct {
-	Clues  *repository.ClueRepo
-	Cases  *repository.CaseRepo // List / 通知案主需要案件資訊（owner 權限判斷、標題）
-	Users  *repository.UserRepo // List 判斷是否認證志願者
-	Notify *service.NotifyService
+	Clues   *repository.ClueRepo
+	Cases   *repository.CaseRepo // List / 通知案主需要案件資訊（owner 權限判斷、標題）
+	Users   *repository.UserRepo // List 判斷是否認證志願者
+	Notify  *service.NotifyService
+	Updates *repository.UpdateRepo // 線索事件寫入案件時間軸（nil 時跳過，方便測試）
 }
 
 type createClueBody struct {
@@ -99,6 +100,16 @@ func (h *ClueHandler) Create(c *gin.Context) {
 		log.Printf("WARN: load case %s for owner-clue notification: %v", caseID, err)
 	}
 
+	// 時間軸記一筆：匿名事件（author = 線索提交者，未登入時 NULL）
+	if h.Updates != nil {
+		kind := "clue"
+		body := "有人回報目擊線索"
+		if err := h.Updates.Add(c.Request.Context(), caseID, reporterID, kind, body); err != nil {
+			// 時間軸失敗不擋主流程
+			log.Printf("WARN: case_updates add clue event for case %s: %v", caseID, err)
+		}
+	}
+
 	c.JSON(http.StatusCreated, gin.H{
 		"id":         clue.ID,
 		"case_id":    clue.CaseID,
@@ -175,4 +186,63 @@ func (h *ClueHandler) List(c *gin.Context) {
 		out = append(out, clueJSON(clue))
 	}
 	c.JSON(http.StatusOK, gin.H{"clues": out})
+}
+
+var validClueStatuses = map[string]bool{"pending": true, "credible": true, "dismissed": true}
+
+type updateClueStatusBody struct {
+	Status string `json:"status" binding:"required"` // credible / dismissed（pending 用於撤銷誤按）
+}
+
+// UpdateClueStatus 處理 PATCH /api/v1/cases/:id/clues/:clueId/status：案主把
+// 線索標記為「可信」（credible）或「已排除」（dismissed）。只允許案主本人。
+func (h *ClueHandler) UpdateStatus(c *gin.Context) {
+	caseID, clueID := c.Param("id"), c.Param("clueId")
+	if !uuidRe.MatchString(caseID) || !uuidRe.MatchString(clueID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var body updateClueStatusBody
+	if err := c.ShouldBindJSON(&body); err != nil || !validClueStatuses[body.Status] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "status must be one of: pending, credible, dismissed"})
+		return
+	}
+
+	cs, err := h.Cases.GetByID(c.Request.Context(), caseID)
+	if errors.Is(err, repository.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "case not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load case"})
+		return
+	}
+	userID, _ := middleware.UserID(c)
+	isOwner := cs.OwnerID != nil && userID == *cs.OwnerID
+	if !isOwner {
+		c.JSON(http.StatusForbidden, gin.H{"error": "only the case owner can review clues"})
+		return
+	}
+
+	if err := h.Clues.SetStatus(c.Request.Context(), caseID, clueID, body.Status); errors.Is(err, repository.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "clue not found"})
+		return
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to review clue"})
+		return
+	}
+
+	// 線索被案主確認是重要進展，寫入時間軸
+	if h.Updates != nil {
+		label := map[string]string{
+			"credible":  "案主確認了一則目擊線索為可信",
+			"dismissed": "案主排除了一則目擊線索",
+			"pending":   "案主將一則目擊線索改回待確認",
+		}[body.Status]
+		owner := cs.OwnerID // 案主本人 = author
+		if err := h.Updates.Add(c.Request.Context(), caseID, owner, "clue", label); err != nil {
+			log.Printf("WARN: case_updates add review event for case %s: %v", caseID, err)
+		}
+	}
+	c.Status(http.StatusNoContent)
 }

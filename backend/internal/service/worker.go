@@ -131,3 +131,37 @@ func runMediaGCOnce(ctx context.Context, mediaDir string, media *repository.Medi
 		log.Printf("media gc: removed=%d skipped=%d", removed, skipped)
 	}
 }
+
+// 軌跡保留期限：已結案/已團聚的案件，結案 TRACKS_RETENTION_DAYS 天後把軌跡刪除。
+// 位置屬個人資料，README 隱私政策承諾會清理；tracks 保留太長只增加外洩風險。
+const (
+	tracksRetentionInterval = 24 * time.Hour
+	tracksRetentionDefault  = 14 * 24 * time.Hour
+)
+
+// RunTrackRetentionLoop 定期刪除已完成案件的主要軌跡資料。
+// retentionDays 可由 main.go 依環境變數覆寫（0 = 用預設 14 天）。
+func RunTrackRetentionLoop(ctx context.Context, tracks *repository.TrackRepo, retention time.Duration) {
+	if retention <= 0 {
+		retention = tracksRetentionDefault
+	}
+	ticker := time.NewTicker(tracksRetentionInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cutoff := time.Now().Add(-retention)
+			n, err := tracks.DeleteForClosedCases(ctx, cutoff)
+			if err != nil {
+				log.Printf("WARN: track retention: delete: %v", err)
+				continue
+			}
+			if n > 0 {
+				log.Printf("track retention: removed=%d (cases closed before %s)", n, cutoff.Format(time.RFC3339))
+			}
+		}
+	}
+}

@@ -43,11 +43,12 @@ export default function TelegramLoginButton({ botUsername, onAuth }: TelegramLog
     script.setAttribute('data-onauth', 'onHomewardTelegramAuth(user)');
     script.setAttribute('data-request-access', 'write');
 
-    containerRef.current?.appendChild(script);
+    const container = containerRef.current;
+    container?.appendChild(script);
 
     return () => {
       delete window.onHomewardTelegramAuth;
-      if (containerRef.current?.contains(script)) containerRef.current.removeChild(script);
+      if (container?.contains(script)) container.removeChild(script);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在掛載/卸載時插入一次
   }, [botUsername]);

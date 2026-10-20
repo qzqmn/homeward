@@ -2,10 +2,10 @@ import type { ReactNode } from 'react';
 import { StyleSheet, View, useWindowDimensions } from 'react-native';
 import { color, shadow } from '../theme/tokens';
 
-// 桌面瀏覽器適配：寬螢幕時不要把內容鎖在 480px 的「手機殼」裡——
-// 改成置中、上限 720px 的響應式欄位，地圖/照片/列表都能用上更多空間，
-// 同時維持單欄版面（桌面版雙欄是之後的事）。其餘仍行動優先。
-const MAX_WIDTH = 720;
+// 桌面瀏覽器適配：寬螢幕（≥760px）時改為置中的響應式卡片。
+// - 一般畫面單欄，內容會自然變寬（上限 1120px，避免 ultra-wide 失焦）。
+// - 首頁會在此斷點切成「地圖 + 清單」雙欄（HomeScreen 用同一個斷點判斷）。
+const MAX_WIDTH = 1120;
 const WIDE_BREAKPOINT = 760;
 
 export function PhoneFrame({ children }: { children: ReactNode }) {

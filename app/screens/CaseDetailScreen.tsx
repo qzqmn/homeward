@@ -4,10 +4,19 @@ import * as ImagePicker from 'expo-image-picker';
 import MapView from '../lib/MapView';
 import { Button } from '../components/Button';
 import { StatusPill } from '../components/StatusPill';
-import { listClues, submitClue, updateCaseStatus } from '../lib/api';
+import {
+  listClues,
+  listMatches,
+  listUpdates,
+  createReport,
+  reviewClue,
+  submitClue,
+  updateCaseStatus,
+  updateMatchStatus,
+} from '../lib/api';
 import { getAuthToken } from '../lib/authStore';
 import { useAuth } from '../lib/useAuth';
-import type { Case, Clue } from '../lib/types';
+import type { Case, CaseUpdate, Clue, MatchSuggestion } from '../lib/types';
 import { caseTypeLabel, color, radius, shadow, space, type as t } from '../theme/tokens';
 import { formatRelativeTime } from '../lib/format';
 
@@ -24,15 +33,24 @@ export function CaseDetailScreen({
   onBack,
   onRequireLogin,
   onStartSearch,
+  onOpenCase,
 }: {
   item: Case;
   apiBaseUrl: string;
   onBack: () => void;
   onRequireLogin: () => void;
   onStartSearch: (item: Case) => void;
+  /** 點配對建議裡的對方案件時跳轉（未提供時只顯示標題）。 */
+  onOpenCase?: (id: string) => void;
 }) {
   const [item, setItem] = useState(initialItem);
   const [clues, setClues] = useState<Clue[] | null>(null);
+  const [updates, setUpdates] = useState<CaseUpdate[] | null>(null);
+  const [matches, setMatches] = useState<MatchSuggestion[] | null>(null);
+  const [reviewingId, setReviewingId] = useState<string | null>(null);
+  /** 舉報表單：'pick-reason' 開著，'sent' 是送出成功訊息 */
+  const [reportingCase, setReportingCase] = useState(false);
+  const [reportMessage, setReportMessage] = useState('');
   const [reporting, setReporting] = useState(false);
   const [note, setNote] = useState('');
   const [photo, setPhoto] = useState<{ uri: string; blob: Blob } | null>(null);
@@ -60,6 +78,10 @@ export function CaseDetailScreen({
         const canViewClues = data.is_owner || user?.verified_volunteer;
         if (token && canViewClues) {
           void listClues(initialItem.id, deps).then((cs) => setClues(cs));
+          void listUpdates(initialItem.id, deps).then((us) => setUpdates(us));
+        }
+        if (token && data.is_owner) {
+          void listMatches(initialItem.id, deps).then((ms) => setMatches(ms));
         }
       })
       .catch(() => {});
@@ -106,6 +128,33 @@ export function CaseDetailScreen({
     } else {
       setSubmitMessage('更新狀態失敗，請稍後再試');
     }
+  };
+
+  /** 案主審核線索：可信 / 已排除 / 撤銷回待確認。就地改狀態，不重新拉整頁。 */
+  const review = async (clueId: string, status: 'credible' | 'dismissed' | 'pending') => {
+    setReviewingId(clueId);
+    const ok = await reviewClue(item.id, clueId, status, { apiBaseUrl, getAuthToken });
+    setReviewingId(null);
+    if (ok) {
+      setClues((cur) => (cur ?? []).map((clue) => (clue.id === clueId ? { ...clue, status } : clue)));
+    } else {
+      setSubmitMessage('審核失敗，請稍後再試');
+    }
+  };
+
+  /** 案主確認/排除一筆配對建議。確認後通常會想去看對方案件，保留在原地即可。 */
+  const decideMatch = async (matchedCaseId: string, status: 'confirmed' | 'rejected') => {
+    setMatches((cur) => (cur ?? []).filter((m) => m.matched_case_id !== matchedCaseId));
+    const ok = await updateMatchStatus(item.id, matchedCaseId, status, { apiBaseUrl, getAuthToken });
+    if (!ok) setSubmitMessage('配對操作失敗，請稍後再試');
+    else if (status === 'confirmed') setSubmitMessage('已確認配對——記得去對方的案件頁看聯絡方式');
+  };
+
+  const reportClue = async (reason: 'scam' | 'harassment' | 'privacy' | 'spam' | 'other') => {
+    setReportMessage('');
+    const ok = await createReport('case', item.id, reason, '', { apiBaseUrl, getAuthToken });
+    setReportingCase(false);
+    setReportMessage(ok ? '已收到舉報，管理員會盡快處理' : '舉報送出失敗，請稍後再試');
   };
 
   const share = async () => {
@@ -171,6 +220,53 @@ export function CaseDetailScreen({
         ) : null}
       </View>
 
+      {/* 配對建議（僅案主）：系統比對走失 ↔ 撿到案件的結果，案主確認或排除。 */}
+      {matches && matches.length > 0 ? (
+        <View style={styles.clueSection}>
+          <Text style={styles.sectionLabel}>系統配對建議（{matches.length}）</Text>
+          <Text style={styles.sectionHint}>
+            系統比對了位置與時間相近的案件。確認前請先核對對方的照片與描述；配對是建議，不代表已找到。
+          </Text>
+          {matches.map((m) => (
+            <View key={m.matched_case_id} style={styles.matchItem}>
+              <Pressable
+                style={styles.matchBody}
+                onPress={() => (onOpenCase ? onOpenCase(m.matched_case_id) : null)}
+                disabled={!onOpenCase}
+              >
+                <Text style={styles.matchTitle}>
+                  {m.case_type === 'found_pet' || m.case_type === 'found_person' ? '🏷️ ' : ''}
+                  {m.title}
+                </Text>
+                <Text style={styles.clueTime}>
+                  相似度 {(m.score * 100).toFixed(0)}% · 點一下看對方的案件
+                </Text>
+              </Pressable>
+              <View style={styles.matchActions}>
+                <Button label="就是這個" onPress={() => void decideMatch(m.matched_case_id, 'confirmed')} />
+                <Button label="不是" variant="ghost" onPress={() => void decideMatch(m.matched_case_id, 'rejected')} />
+              </View>
+            </View>
+          ))}
+        </View>
+      ) : null}
+
+      {/* 案件時間軸（案主/認證志願者）：建立、線索回報、審核、結案的完整紀錄。 */}
+      {updates && updates.length > 0 ? (
+        <View style={styles.clueSection}>
+          <Text style={styles.sectionLabel}>案件時間軸</Text>
+          {updates.map((u) => (
+            <View key={u.id} style={styles.timelineItem}>
+              <Text style={styles.timelineDot}>{timelineKindIcon[u.kind] ?? '•'}</Text>
+              <View style={styles.timelineBody}>
+                <Text style={styles.clueNote}>{u.body}</Text>
+                <Text style={styles.clueTime}>{formatRelativeTime(u.created_at)}</Text>
+              </View>
+            </View>
+          ))}
+        </View>
+      ) : null}
+
       {/* 線索列表（僅案主/認證志願者）：主線「路人回報 → 案主看到」的完成端。 */}
       {clues ? (
         <View style={styles.clueSection}>
@@ -179,18 +275,36 @@ export function CaseDetailScreen({
             <Text style={styles.clueEmpty}>還沒有人回報目擊。</Text>
           ) : (
             clues.map((clue) => (
-              <Pressable
-                key={clue.id}
-                style={({ pressed }) => [styles.clueItem, pressed && styles.clueItemPressed]}
-                onPress={() => setViewerPhoto(clue.photo_url)}
-              >
-                <Image source={{ uri: clue.photo_url }} style={styles.cluePhoto} resizeMode="cover" />
-                <View style={styles.clueBody}>
-                  <Text style={styles.clueTime}>{formatRelativeTime(clue.sighted_at)}目擊</Text>
-                  {clue.note ? <Text style={styles.clueNote} numberOfLines={3}>{clue.note}</Text> : null}
-                  <Text style={styles.clueCta}>點一下看全圖</Text>
-                </View>
-              </Pressable>
+              <View key={clue.id}>
+                <Pressable
+                  style={({ pressed }) => [styles.clueItem, pressed && styles.clueItemPressed]}
+                  onPress={() => setViewerPhoto(clue.photo_url)}
+                >
+                  <Image source={{ uri: clue.photo_url }} style={styles.cluePhoto} resizeMode="cover" />
+                  <View style={styles.clueBody}>
+                    <Text style={styles.clueTime}>
+                      {formatRelativeTime(clue.sighted_at)}目擊{clueStatusLabel[clue.status]}
+                    </Text>
+                    {clue.note ? <Text style={styles.clueNote} numberOfLines={3}>{clue.note}</Text> : null}
+                    <Text style={styles.clueCta}>點一下看全圖</Text>
+                  </View>
+                </Pressable>
+                {item.is_owner ? (
+                  <View style={styles.reviewRow}>
+                    <Button
+                      label="可信"
+                      variant={clue.status === 'credible' ? 'primary' : 'secondary'}
+                      loading={reviewingId === clue.id}
+                      onPress={() => void review(clue.id, clue.status === 'credible' ? 'pending' : 'credible')}
+                    />
+                    <Button
+                      label="排除"
+                      variant={clue.status === 'dismissed' ? 'ghost' : 'secondary'}
+                      onPress={() => void review(clue.id, clue.status === 'dismissed' ? 'pending' : 'dismissed')}
+                    />
+                  </View>
+                ) : null}
+              </View>
             ))
           )}
         </View>
@@ -210,6 +324,12 @@ export function CaseDetailScreen({
           <Text style={styles.volunteerHint}>
             搜索模式會記錄你的位置軌跡，讓大家都知道哪些區域已經找過。
           </Text>
+          {token && !item.is_owner ? (
+            <>
+              <Button label="舉報這個案件" variant="ghost" onPress={() => setReportingCase(true)} fullWidth />
+              {reportMessage ? <Text style={styles.clueEmpty}>{reportMessage}</Text> : null}
+            </>
+          ) : null}
         </View>
       ) : (
         <View style={styles.reportForm}>
@@ -249,9 +369,46 @@ export function CaseDetailScreen({
           <Text style={styles.viewerHint}>點一下關閉</Text>
         </Pressable>
       </Modal>
+
+      {/* 舉報原因選單：只回報案件本身；個別線索的濫用由案主「排除」即可處理 */}
+      <Modal visible={reportingCase} transparent animationType="fade" onRequestClose={() => setReportingCase(false)}>
+        <Pressable style={styles.viewerBackdrop} onPress={() => setReportingCase(false)}>
+          <Pressable style={styles.reportSheet} onPress={() => {}}>
+            <Text style={styles.reportSheetTitle}>為什麼要舉報這個案件？</Text>
+            {(
+              [
+                ['scam', '懷疑詐騙（冒充身份、募款、領養費）'],
+                ['privacy', '含有隱私資訊（住址、證件、聯絡方式）'],
+                ['spam', '垃圾內容或重複發案'],
+                ['harassment', '騷擾性內容'],
+                ['other', '其他問題'],
+              ] as const
+            ).map(([reason, label]) => (
+              <Pressable key={reason} style={styles.reportOption} onPress={() => void reportClue(reason)}>
+                <Text style={styles.reportOptionText}>{label}</Text>
+              </Pressable>
+            ))}
+            <Button label="取消" variant="ghost" onPress={() => setReportingCase(false)} />
+          </Pressable>
+        </Pressable>
+      </Modal>
     </>
   );
 }
+
+const clueStatusLabel: Record<string, string> = {
+  pending: '',
+  credible: ' · 已由案主確認可信',
+  dismissed: ' · 已排除',
+};
+
+const timelineKindIcon: Record<string, string> = {
+  system: '🏁',
+  clue: '📍',
+  status_change: '🔔',
+  match: '🐾',
+  note: '📝',
+};
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: color.canvas },
@@ -311,6 +468,36 @@ const styles = StyleSheet.create({
   clueNote: { ...t.body, color: color.ink, marginTop: space.xs },
   clueCta: { ...t.caption, color: color.home, marginTop: space.xs },
   clueEmpty: { ...t.bodyMedium, color: color.inkSoft, marginTop: space.sm },
+  matchItem: {
+    backgroundColor: color.surface,
+    borderRadius: radius.md,
+    marginTop: space.sm,
+    padding: space.md,
+    ...shadow.card,
+  },
+  matchBody: { gap: space.xs },
+  matchTitle: { ...t.bodyMedium, color: color.ink },
+  matchActions: { flexDirection: 'row', gap: space.sm, marginTop: space.sm },
+  timelineItem: { flexDirection: 'row', gap: space.md, marginTop: space.md },
+  timelineDot: { fontSize: 16, paddingTop: 2 },
+  timelineBody: { flex: 1, gap: 2 },
+  reviewRow: { flexDirection: 'row', gap: space.sm, marginTop: space.xs, paddingLeft: space.sm },
+  reportSheet: {
+    width: '88%',
+    maxWidth: 420,
+    backgroundColor: color.surface,
+    borderRadius: radius.lg,
+    padding: space.lg,
+    gap: space.sm,
+  },
+  reportSheetTitle: { ...t.titleM, color: color.ink, marginBottom: space.xs },
+  reportOption: {
+    paddingVertical: space.md,
+    paddingHorizontal: space.md,
+    borderRadius: radius.md,
+    backgroundColor: color.surfaceAlt,
+  },
+  reportOptionText: { ...t.bodyMedium, color: color.ink },
   volunteerHint: { ...t.caption, color: color.inkFaint, textAlign: 'center' },
   submitMessage: { ...t.bodyMedium, color: color.hope, marginTop: space.md, textAlign: 'center' },
   viewerBackdrop: {

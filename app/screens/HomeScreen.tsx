@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import MapView, { type MapMarker } from '../lib/MapView';
 import { CaseCard } from '../components/CaseCard';
 import { useNearbyCases } from '../lib/useNearbyCases';
@@ -25,6 +25,10 @@ export function HomeScreen({
   onAccountPress: () => void;
 }) {
   const { cases, isSample } = useNearbyCases(apiBaseUrl, HK_CENTER.lng, HK_CENTER.lat);
+  // 桌面/平板（≥760px，與 PhoneFrame 同一個斷點）：地圖與清單並排成兩欄，
+  // 清單不再是從螢幕底抽出來的 sheet。
+  const { width } = useWindowDimensions();
+  const isWide = width >= 760;
 
   const markers: MapMarker[] = useMemo(
     () =>
@@ -40,8 +44,8 @@ export function HomeScreen({
   const caseById = useMemo(() => new Map(cases.map((c) => [c.id, c])), [cases]);
 
   return (
-    <View style={styles.screen}>
-      <View style={styles.mapWrap}>
+    <View style={[styles.screen, isWide && styles.screenWide]}>
+      <View style={[styles.mapWrap, isWide && styles.mapWrapWide]}>
         <MapView
           centerLng={HK_CENTER.lng}
           centerLat={HK_CENTER.lat}
@@ -72,8 +76,8 @@ export function HomeScreen({
         </Pressable>
       </View>
 
-      <View style={styles.sheet}>
-        <View style={styles.sheetHandle} />
+      <View style={[styles.sheet, isWide && styles.sheetWide]}>
+        {isWide ? <View style={styles.sheetGap} /> : <View style={styles.sheetHandle} />}
         <View style={styles.sheetHeaderRow}>
           <Text style={styles.sheetTitle}>附近協尋（{cases.length}）</Text>
           {isSample ? <Text style={styles.sampleNote}>示範資料</Text> : null}
@@ -94,7 +98,9 @@ export function HomeScreen({
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: color.canvas },
+  screenWide: { flexDirection: 'row' },
   mapWrap: { flex: 1.1 },
+  mapWrapWide: { flex: 1, borderWidth: 0 },
   header: {
     position: 'absolute',
     top: space.lg,
@@ -154,6 +160,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.lg,
     marginTop: -radius.lg,
   },
+  sheetWide: {
+    marginTop: 0,
+    paddingTop: space.md,
+    borderTopLeftRadius: 0,
+    borderTopRightRadius: 0,
+    maxWidth: 480,
+  },
+  sheetGap: { paddingTop: 4 },
   sheetHandle: {
     alignSelf: 'center',
     width: 36,

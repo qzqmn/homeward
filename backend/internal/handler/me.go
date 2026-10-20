@@ -76,3 +76,42 @@ func (h *MeHandler) RegisterChannel(c *gin.Context) {
 	}
 	c.Status(http.StatusNoContent)
 }
+
+// Get 處理 GET /api/v1/me：目前登入者的基本資料，前端用來顯示
+// 志願者申請狀態與管理員入口（不回傳任何敏感欄位）。
+func (h *MeHandler) Get(c *gin.Context) {
+	userID, _ := middleware.UserID(c)
+	u, err := h.Users.GetByID(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load user"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"id":                  u.ID,
+		"display_name":        u.DisplayName,
+		"verified_volunteer":  u.IsVerifiedVolunteer(),
+		"volunteer_requested": u.VolunteerRequestedAt != nil,
+		"is_admin":            u.Role == "admin",
+	})
+}
+
+// RequestVolunteer 處理 POST /api/v1/me/volunteer-request：申請成為認證志願者。
+// 審核由管理員在 admin API 完成；這裡只登記意願（冪等，可重複按）。
+func (h *MeHandler) RequestVolunteer(c *gin.Context) {
+	userID, _ := middleware.UserID(c)
+
+	u, err := h.Users.GetByID(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load user"})
+		return
+	}
+	if u.IsVerifiedVolunteer() {
+		c.JSON(http.StatusConflict, gin.H{"error": "already a verified volunteer"})
+		return
+	}
+	if err := h.Users.RequestVolunteer(c.Request.Context(), userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save request"})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}

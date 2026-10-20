@@ -70,6 +70,8 @@ func Build(d Deps) Built {
 	channelRepo := repository.NewChannelRepo(d.Pg)
 	notificationRepo := repository.NewNotificationRepo(d.Pg)
 	matchRepo := repository.NewMatchRepo(d.Pg)
+	updateRepo := repository.NewUpdateRepo(d.Pg)
+	reportRepo := repository.NewReportRepo(d.Pg)
 
 	authSvc := service.NewAuthService(d.Redis)
 	matchingSvc := service.NewMatchingService(matchRepo)
@@ -82,11 +84,14 @@ func Build(d Deps) Built {
 		Channels:         channelRepo,
 		TelegramBotToken: d.Cfg.TelegramBotToken,
 	}
-	caseH := &handler.CaseHandler{Cases: caseRepo, Users: userRepo, Matching: matchingSvc, Notify: notifySvc}
-	clueH := &handler.ClueHandler{Clues: clueRepo, Cases: caseRepo, Users: userRepo, Notify: notifySvc}
+	caseH := &handler.CaseHandler{Cases: caseRepo, Users: userRepo, Matching: matchingSvc, Notify: notifySvc, Updates: updateRepo}
+	clueH := &handler.ClueHandler{Clues: clueRepo, Cases: caseRepo, Users: userRepo, Notify: notifySvc, Updates: updateRepo}
 	trackH := &handler.TrackHandler{Tracks: trackRepo}
 	meH := &handler.MeHandler{Users: userRepo, Channels: channelRepo}
 	matchH := &handler.MatchHandler{Matches: matchRepo, Cases: caseRepo}
+	updateH := &handler.UpdateHandler{Updates: updateRepo, Cases: caseRepo, Users: userRepo}
+	adminH := &handler.AdminHandler{Users: userRepo}
+	reportH := &handler.ReportHandler{Reports: reportRepo, Users: userRepo}
 	appConfigH := &handler.AppConfigHandler{TelegramBotUsername: d.Cfg.TelegramBotUsername}
 	shareH := &handler.ShareHandler{Cases: caseRepo, BaseURL: d.Cfg.BaseURL}
 
@@ -112,24 +117,40 @@ func Build(d Deps) Built {
 
 		me := v1.Group("/me", requireAuth)
 		{
-			me.POST("/watch-area", meH.SetWatchArea)  // 設定關注區域，供半徑推播比對
-			me.POST("/channels", meH.RegisterChannel) // 註冊通知渠道
-			me.GET("/cases", caseH.ListMine)          // 我的案件（含已結案的），案主清單入口
+			me.GET("", meH.Get)                                 // 目前使用者基本資料（志願者/管理員狀態）
+			me.POST("/watch-area", meH.SetWatchArea)            // 設定關注區域，供半徑推播比對
+			me.POST("/channels", meH.RegisterChannel)           // 註冊通知渠道
+			me.GET("/cases", caseH.ListMine)                    // 我的案件（含已結案的），案主清單入口
+			me.POST("/volunteer-request", meH.RequestVolunteer) // 申請成為認證志願者（管理員審核）
+		}
+
+		// 舉報：登入使用者回報詐騙/騷擾/垃圾內容；限流防灌爆審核清單
+		v1.POST("/reports", requireAuth, middleware.RateLimit(d.Redis, "report-create", 5, time.Minute), reportH.Create)
+
+		// 管理員審核（handler 內逐一驗 role='admin'）
+		admin := v1.Group("/admin")
+		{
+			admin.GET("/volunteer-requests", adminH.ListVolunteerRequests)
+			admin.POST("/volunteer-requests/:userId", adminH.VerifyVolunteer)
+			admin.GET("/reports", reportH.ListOpen)
+			admin.PATCH("/reports/:id", reportH.UpdateStatus)
 		}
 
 		cases := v1.Group("/cases")
 		{
-			cases.GET("", caseH.ListNearby)                                          // 公開：附近案件（一律模糊座標）
-			cases.POST("", requireAuth, caseH.Create)                                // 發案需登入；會觸發配對比對與通知排程
-			cases.GET("/:id", optionalAuth, caseH.Get)                               // 詳情：依權限決定精確/模糊座標
-			cases.PATCH("/:id/status", requireAuth, caseH.UpdateStatus)              // 結案／標記已團聚，僅限案主
+			cases.GET("", caseH.ListNearby)                             // 公開：附近案件（一律模糊座標）
+			cases.POST("", requireAuth, caseH.Create)                   // 發案需登入；會觸發配對比對與通知排程
+			cases.GET("/:id", optionalAuth, caseH.Get)                  // 詳情：依權限決定精確/模糊座標
+			cases.PATCH("/:id/status", requireAuth, caseH.UpdateStatus) // 結案／標記已團聚，僅限案主
 			// 提交線索免登入，登入可關聯身份。掛限流防匿名灌水
 			cases.POST("/:id/clues", middleware.RateLimit(d.Redis, "clue-create", 10, time.Minute), optionalAuth, clueH.Create)
-			cases.GET("/:id/clues", requireAuth, clueH.List) // 線索列表：僅案主本人或認證志願者
-			cases.POST("/:id/tracks", requireAuth, trackH.Create)                    // 上報軌跡需登入（志願者搜索模式）
-			cases.GET("/:id/coverage", trackH.Coverage)                              // 公開：搜索覆蓋熱圖
-			cases.GET("/:id/matches", requireAuth, matchH.List)                      // 配對建議，僅案主可見
-			cases.PATCH("/:id/matches/:matchedId", requireAuth, matchH.UpdateStatus) // 確認／排除配對建議
+			cases.GET("/:id/clues", requireAuth, clueH.List)                          // 線索列表：僅案主本人或認證志願者
+			cases.PATCH("/:id/clues/:clueId/status", requireAuth, clueH.UpdateStatus) // 案主審核線索（可信/排除）
+			cases.GET("/:id/updates", requireAuth, updateH.List)                      // 案件時間軸：案主/認證志願者
+			cases.POST("/:id/tracks", requireAuth, trackH.Create)                     // 上報軌跡需登入（志願者搜索模式）
+			cases.GET("/:id/coverage", trackH.Coverage)                               // 公開：搜索覆蓋熱圖
+			cases.GET("/:id/matches", requireAuth, matchH.List)                       // 配對建議，僅案主可見
+			cases.PATCH("/:id/matches/:matchedId", requireAuth, matchH.UpdateStatus)  // 確認／排除配對建議
 		}
 	}
 	return Built{Engine: r, Notify: notifySvc}

@@ -9,7 +9,19 @@ import { caseTypeLabel, color, radius, space, type as t } from '../theme/tokens'
 
 const HK_CENTER = { lng: 114.1694, lat: 22.3193 };
 
-type ReportType = 'missing_pet' | 'missing_person';
+type ReportType = 'missing_pet' | 'missing_person' | 'found_pet' | 'found_person';
+
+const isFound = (tKey: ReportType) => tKey === 'found_pet' || tKey === 'found_person';
+
+/** 把手動輸入的時間字串解析成 ISO；空字串或解析失敗回 null（呼叫端改用「現在」）。 */
+function parseLastSeen(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const normalized = trimmed.replace(' ', 'T') + (trimmed.length === 16 ? ':00' : '');
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
 
 export function ReportCaseScreen({
   apiBaseUrl,
@@ -25,6 +37,7 @@ export function ReportCaseScreen({
   const [caseType, setCaseType] = useState<ReportType>('missing_pet');
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  const [lastSeenText, setLastSeenText] = useState('');
   const [location, setLocation] = useState(HK_CENTER);
   const [photo, setPhoto] = useState<{ uri: string; blob: Blob } | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -68,9 +81,9 @@ export function ReportCaseScreen({
           description,
           lng: location.lng,
           lat: location.lat,
-          // 目前沒有時間選擇器，先固定用「現在」；不送的話後端存 NULL，
-          // 列表上就看不到「X 小時前」，配對演算法的時間比對也會失效。
-          last_seen_at: new Date().toISOString(),
+          // 手動輸入（YYYY-MM-DD HH:mm，也接受剪貼簿貼上的 ISO）；留空/解析失敗用「現在」。
+          // 雖然後端會 clamp 未來時間，配對演算法依然需要真實的時間比對。
+          last_seen_at: parseLastSeen(lastSeenText) ?? new Date().toISOString(),
           photo_path: photoPath,
         },
         deps,
@@ -78,6 +91,8 @@ export function ReportCaseScreen({
 
       if (res.status === 401) {
         onRequireLogin();
+      } else if (res.status === 400) {
+        setMessage('內容有些問題（例如時間格式），請檢查後再送出');
       } else if (res.ok) {
         setMessage('已發布，謝謝你，希望很快有好消息');
         onDone();
@@ -96,11 +111,11 @@ export function ReportCaseScreen({
       <Pressable onPress={onBack} style={styles.backRow}>
         <Text style={styles.backText}>← 返回</Text>
       </Pressable>
-      <Text style={styles.title}>發布協尋</Text>
-      <Text style={styles.hint}>先填最重要的幾項就能發布，其他細節之後都能補充。</Text>
+      <Text style={styles.title}>發布案件</Text>
+      <Text style={styles.hint}>撿到走失的寵物/長者也可以發布——兩邊的案件會由系統自動配對。先填最重要的幾項就能發布。</Text>
 
       <View style={styles.typeRow}>
-        {(['missing_pet', 'missing_person'] as ReportType[]).map((tKey) => (
+        {(['missing_pet', 'missing_person', 'found_pet', 'found_person'] as ReportType[]).map((tKey) => (
           <Pressable
             key={tKey}
             onPress={() => setCaseType(tKey)}
@@ -124,7 +139,15 @@ export function ReportCaseScreen({
       <Text style={styles.label}>標題</Text>
       <TextInput
         style={styles.input}
-        placeholder={caseType === 'missing_pet' ? '例如：小白（橘白色唐貓）' : '例如：陳伯伯'}
+        placeholder={
+          isFound(caseType)
+            ? caseType === 'found_pet'
+              ? '例如：撿到一隻白色貴婦犬（中環碼頭）'
+              : '例如：在公園遇到一位長者走失'
+            : caseType === 'missing_pet'
+              ? '例如：小白（橘白色唐貓）'
+              : '例如：陳伯伯'
+        }
         placeholderTextColor={color.inkFaint}
         value={title}
         onChangeText={setTitle}
@@ -141,7 +164,18 @@ export function ReportCaseScreen({
         numberOfLines={3}
       />
 
-      <Text style={styles.label}>最後出現地點</Text>
+      <Text style={styles.label}>{isFound(caseType) ? '發現時間' : '最後出現時間'}（選填）</Text>
+      <TextInput
+        style={styles.input}
+        placeholder="YYYY-MM-DD HH:mm，留空＝現在"
+        placeholderTextColor={color.inkFaint}
+        value={lastSeenText}
+        onChangeText={setLastSeenText}
+        autoCapitalize="none"
+      />
+      <Text style={styles.hint}>精確的時間能讓配對建議更準確。</Text>
+
+      <Text style={styles.label}>{isFound(caseType) ? '發現地點' : '最後出現地點'}</Text>
       <Text style={styles.hint}>輕觸地圖來標示位置</Text>
       <View style={styles.mapBox}>
         <MapView
@@ -154,7 +188,7 @@ export function ReportCaseScreen({
       </View>
 
       <View style={styles.submitRow}>
-        <Button label="發布協尋" onPress={submit} disabled={!canSubmit} loading={submitting} fullWidth />
+        <Button label="發布案件" onPress={submit} disabled={!canSubmit} loading={submitting} fullWidth />
       </View>
       {message ? <Text style={styles.message}>{message}</Text> : null}
     </ScrollView>

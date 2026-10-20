@@ -76,7 +76,6 @@ const memoryStore = new Map<string, PendingItem>();
 function warnFallbackOnce(): void {
   if (usingMemoryFallback) return;
   usingMemoryFallback = true;
-  // eslint-disable-next-line no-console -- 刻意保留：這是開發者/支援人員排查問題的重要線索
   console.warn(
     '[homeward] IndexedDB 無法使用，離線佇列改用記憶體暫存（重新整理或關閉分頁後會遺失）。' +
       '常見於部分瀏覽器的私密瀏覽模式。',

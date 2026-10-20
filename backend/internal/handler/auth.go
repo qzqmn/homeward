@@ -19,6 +19,9 @@ type AuthHandler struct {
 	Users            *repository.UserRepo
 	Channels         *repository.ChannelRepo
 	TelegramBotToken string // 空字串表示沒設定，Telegram 登入會回 503
+	// Admin 非空時：telegram_id 在 ADMIN_TELEGRAM_IDS 名單內的帳號登入時自動升級
+	// 為 admin（第一個管理員的初始化通道，不必進 VPS 跑 SQL）。
+	Admin *AdminHandler
 }
 
 type requestOTPBody struct {
@@ -158,6 +161,15 @@ func (h *AuthHandler) TelegramLogin(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
 		return
+	}
+
+	// ADMIN_TELEGRAM_IDS 名單內的帳號自動升級成 admin（失敗不擋登入主流程）。
+	if h.Admin != nil {
+		h.Admin.MaybeAutoPromoteAdmin(c.Request.Context(), telegramID)
+		// 重新讀取更新後的角色，讓下面的 /me 資料與登入回傳反映最新權限
+		if fresh, err := h.Users.GetByID(c.Request.Context(), user.ID); err == nil {
+			user = fresh
+		}
 	}
 
 	// 自動註冊通知渠道；失敗不影響登入本身（只是這次沒順便設定好通知，

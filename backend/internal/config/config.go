@@ -36,6 +36,11 @@ type Config struct {
 	// 留在 Worker 那端，後端完全不需要知道。沒設定時只印 log（本機測試用）。
 	// 可以隨時只改這個環境變數、不需要重新編譯或改程式碼。
 	NotifyWebhookURL string
+
+	// AdminTelegramIDs（ADMIN_TELEGRAM_IDS，逗號分隔）：名單內的 Telegram id
+	// 登入時自動升級為 admin，第一次部署不用進 VPS 跑 SQL 建第一個管理員。
+	// 留空則完全由 admin API / 手動 SQL 管理。
+	AdminTelegramIDs string
 }
 
 func Load() Config {
@@ -60,6 +65,7 @@ func Load() Config {
 		TelegramBotToken:    os.Getenv("TELEGRAM_BOT_TOKEN"),
 		TelegramBotUsername: os.Getenv("TELEGRAM_BOT_USERNAME"),
 		NotifyWebhookURL:    os.Getenv("NOTIFY_WEBHOOK_URL"),
+		AdminTelegramIDs:    os.Getenv("ADMIN_TELEGRAM_IDS"),
 	}
 }
 

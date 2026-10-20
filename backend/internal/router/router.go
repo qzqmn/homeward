@@ -78,11 +78,18 @@ func Build(d Deps) Built {
 	notifySvc := service.NewNotifyService(userRepo, notificationRepo, d.Cfg.NotifyWebhookURL, d.Cfg.BaseURL)
 
 	photoH := &handler.PhotoHandler{MediaDir: d.Cfg.MediaDir, MaxBytes: d.Cfg.MaxUploadBytes}
+	adminH := &handler.AdminHandler{
+		Users:            userRepo,
+		Cases:            caseRepo,
+		Updates:          updateRepo,
+		AdminTelegramIDs: handler.ParseAdminTelegramIDs(d.Cfg.AdminTelegramIDs),
+	}
 	authH := &handler.AuthHandler{
 		Auth:             authSvc,
 		Users:            userRepo,
 		Channels:         channelRepo,
 		TelegramBotToken: d.Cfg.TelegramBotToken,
+		Admin:            adminH, // ADMIN_TELEGRAM_IDS 登入時自動升級
 	}
 	caseH := &handler.CaseHandler{Cases: caseRepo, Users: userRepo, Matching: matchingSvc, Notify: notifySvc, Updates: updateRepo}
 	clueH := &handler.ClueHandler{Clues: clueRepo, Cases: caseRepo, Users: userRepo, Notify: notifySvc, Updates: updateRepo}
@@ -90,7 +97,6 @@ func Build(d Deps) Built {
 	meH := &handler.MeHandler{Users: userRepo, Channels: channelRepo}
 	matchH := &handler.MatchHandler{Matches: matchRepo, Cases: caseRepo}
 	updateH := &handler.UpdateHandler{Updates: updateRepo, Cases: caseRepo, Users: userRepo}
-	adminH := &handler.AdminHandler{Users: userRepo}
 	reportH := &handler.ReportHandler{Reports: reportRepo, Users: userRepo}
 	appConfigH := &handler.AppConfigHandler{TelegramBotUsername: d.Cfg.TelegramBotUsername}
 	shareH := &handler.ShareHandler{Cases: caseRepo, BaseURL: d.Cfg.BaseURL}
@@ -127,13 +133,17 @@ func Build(d Deps) Built {
 		// 舉報：登入使用者回報詐騙/騷擾/垃圾內容；限流防灌爆審核清單
 		v1.POST("/reports", requireAuth, middleware.RateLimit(d.Redis, "report-create", 5, time.Minute), reportH.Create)
 
-		// 管理員審核（handler 內逐一驗 role='admin'）
+		// 管理後台（handler 內逐一驗 role='admin'；前端畫面在 /admin 路由）
 		admin := v1.Group("/admin")
 		{
 			admin.GET("/volunteer-requests", adminH.ListVolunteerRequests)
 			admin.POST("/volunteer-requests/:userId", adminH.VerifyVolunteer)
 			admin.GET("/reports", reportH.ListOpen)
 			admin.PATCH("/reports/:id", reportH.UpdateStatus)
+			admin.GET("/cases", adminH.ListCases)                  // 所有案件概觀（處理詐騙案等）
+			admin.PATCH("/cases/:id/status", adminH.SetCaseStatus) // 下架/復原/改狀態
+			admin.GET("/users", adminH.ListUsers)                  // 使用者概觀
+			admin.POST("/users/:userId/role", adminH.SetUserRole)  // 升級/撤銷管理員
 		}
 
 		cases := v1.Group("/cases")

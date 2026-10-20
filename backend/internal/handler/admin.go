@@ -1,18 +1,25 @@
-// Package handler：管理員（users.role='admin'）審核志願者申請。
+// Package handler：管理員（users.role='admin'）專屬後台 API——志願者審核、
+// 案件管理（狀態調整）、使用者管理（升級/撤銷管理員）。
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"homeward/internal/middleware"
 	"homeward/internal/repository"
 )
 
 type AdminHandler struct {
-	Users *repository.UserRepo
+	Users            *repository.UserRepo
+	Cases            *repository.CaseRepo
+	Updates          *repository.UpdateRepo
+	AdminTelegramIDs []int64 // .env ADMIN_TELEGRAM_IDS：這些 Telegram id 登入時自動升級為 admin
 }
 
 // ListVolunteerRequests 處理 GET /api/v1/admin/volunteer-requests：審核清單
@@ -78,4 +85,192 @@ func (h *AdminHandler) VerifyVolunteer(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// ---- 案件管理 ----
+
+// ListCases 處理 GET /api/v1/admin/cases：所有案件（含已結案）的最新在前列表，
+// 給管理員快速下架詐騙案/恢復誤結案。只回基本欄位，公開座標（不必要的隱私不出 admin 列表）。
+func (h *AdminHandler) ListCases(c *gin.Context) {
+	if !isAdmin(c, h.Users) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin only"})
+		return
+	}
+	cases, err := h.Cases.ListAll(c.Request.Context(), 100)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list cases"})
+		return
+	}
+	out := make([]gin.H, 0, len(cases))
+	for _, cs := range cases {
+		out = append(out, gin.H{
+			"id":         cs.ID,
+			"title":      cs.Title,
+			"case_type":  cs.CaseType,
+			"status":     cs.Status,
+			"created_at": cs.CreatedAt,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"cases": out})
+}
+
+type adminCaseStatusBody struct {
+	Status string `json:"status" binding:"required"`
+}
+
+// SetCaseStatus 處理 PATCH /api/v1/admin/cases/:id/status：管理員改任一案件的狀態
+// （下架詐騙案＝closed、誤標團聚＝open 等）。同時寫進案件時間軸讓變更可追蹤。
+func (h *AdminHandler) SetCaseStatus(c *gin.Context) {
+	adminID, ok := adminUserID(c, h.Users)
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin only"})
+		return
+	}
+	caseID := c.Param("id")
+	if !uuidRe.MatchString(caseID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid case id"})
+		return
+	}
+	var body adminCaseStatusBody
+	if err := c.ShouldBindJSON(&body); err != nil || !validCaseStatuses[body.Status] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "status must be one of: open, found, closed"})
+		return
+	}
+	if err := h.Cases.UpdateStatus(c.Request.Context(), caseID, body.Status); errors.Is(err, repository.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "case not found"})
+		return
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update case"})
+		return
+	}
+	if h.Updates != nil {
+		label := map[string]string{
+			"open":   "管理員開啟此案件（誤結案復原或重新啟動搜尋）",
+			"found":  "管理員將此案件標記為已團聚",
+			"closed": "管理員結束此案件",
+		}[body.Status]
+		author := adminID
+		_ = h.Updates.Add(c.Request.Context(), caseID, &author, "status_change", label) // 失敗不擋主流程
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// ---- 使用者管理 ----
+
+// ListUsers 處理 GET /api/v1/admin/users：所有未刪除帳號的概觀（新在前）。
+// 只回顯示名稱/聯絡/角色/志願者狀態，不放任何其他個人資料。
+func (h *AdminHandler) ListUsers(c *gin.Context) {
+	if !isAdmin(c, h.Users) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin only"})
+		return
+	}
+	users, err := h.Users.ListUsers(c.Request.Context(), 200)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list users"})
+		return
+	}
+	out := make([]gin.H, 0, len(users))
+	for _, u := range users {
+		contact := ""
+		switch {
+		case u.TelegramID != nil:
+			contact = "telegram:" + strconv.FormatInt(*u.TelegramID, 10)
+		case u.PhoneE164 != nil:
+			contact = "phone:" + *u.PhoneE164
+		}
+		out = append(out, gin.H{
+			"id":        u.ID,
+			"contact":   contact,
+			"role":      u.Role,
+			"volunteer": u.VolunteerVerifiedAt != nil,
+			"name":      u.DisplayName,
+			"joined":    u.CreatedAt,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"users": out})
+}
+
+type adminSetRoleBody struct {
+	Role string `json:"role" binding:"required"`
+}
+
+// SetUserRole 處理 POST /api/v1/admin/users/:userId/role：升級（user→admin）或
+// 撤銷管理員（admin→user）。「誰能當管理員」的最終開關。
+func (h *AdminHandler) SetUserRole(c *gin.Context) {
+	adminID, ok := adminUserID(c, h.Users)
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin only"})
+		return
+	}
+	userID := c.Param("userId")
+	if !uuidRe.MatchString(userID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+		return
+	}
+	var body adminSetRoleBody
+	if err := c.ShouldBindJSON(&body); err != nil || (body.Role != "user" && body.Role != "admin") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be user or admin"})
+		return
+	}
+	// 自我降級防呆：最後一位管理員把自己降級會把整個平台鎖在外面（下一個 admin 只能跑 SQL）。
+	if userID == adminID && body.Role != "admin" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot demote yourself; ask another admin or use SQL"})
+		return
+	}
+	if err := h.Users.SetRole(c.Request.Context(), userID, body.Role); errors.Is(err, repository.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to set role"})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// adminUserID 是 isAdmin 的加強版：確認 admin 之餘也把 userID 帶出來
+// （給時間軸 author 與自我降級防呆用）。
+func adminUserID(c *gin.Context, users *repository.UserRepo) (string, bool) {
+	userID, ok := middleware.UserID(c)
+	if !ok {
+		return "", false
+	}
+	user, err := users.GetByID(c.Request.Context(), userID)
+	if err != nil || user.Role != "admin" {
+		return "", false
+	}
+	return userID, true
+}
+
+// ParseAdminTelegramIDs 解析 .env 的 ADMIN_TELEGRAM_IDS（逗號分隔的 Telegram id）。
+// 空字串回 empty slice；亂碼的值忽略（不爆破管理，聚合在登入流程的比對上）。
+func ParseAdminTelegramIDs(s string) []int64 {
+	var out []int64
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if id, err := strconv.ParseInt(part, 10, 64); err == nil && id > 0 {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// MaybeAutoPromoteAdmin 在 Telegram 登入成功後檢查：帳號的 telegram_id 若在
+// ADMIN_TELEGRAM_IDS 名單內，自動升級為 admin（第一次部署設定第一個管理員用，
+// 不需要進 VPS 跑 SQL）。名單還是只在後端設定檔有效，不會被 client 端影響。
+func (h *AdminHandler) MaybeAutoPromoteAdmin(ctx context.Context, telegramID int64) {
+	if len(h.AdminTelegramIDs) == 0 {
+		return
+	}
+	for _, id := range h.AdminTelegramIDs {
+		if id == telegramID {
+			if u, err := h.Users.GetByTelegramID(ctx, telegramID); err == nil && u.Role != "admin" {
+				_ = h.Users.SetRole(ctx, u.ID, "admin")
+				_ = h.Users.SetVolunteerVerified(ctx, u.ID, true) // 第一個管理員通常也會幫忙搜索
+			}
+			break
+		}
+	}
 }

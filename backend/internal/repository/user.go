@@ -65,6 +65,19 @@ func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
 	return u, err
 }
 
+// GetByTelegramID 依 Telegram 帳號 id 查使用者（ADMIN_TELEGRAM_IDS 自動升級時用）。
+func (r *UserRepo) GetByTelegramID(ctx context.Context, telegramID int64) (User, error) {
+	const q = `SELECT id::text, phone_e164, telegram_id, display_name, locale, role, volunteer_verified_at, volunteer_requested_at
+	           FROM users WHERE telegram_id = $1 AND deleted_at IS NULL`
+	var u User
+	err := r.db.QueryRow(ctx, q, telegramID).
+		Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.DisplayName, &u.Locale, &u.Role, &u.VolunteerVerifiedAt, &u.VolunteerRequestedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, ErrNotFound
+	}
+	return u, err
+}
+
 // IsVerifiedVolunteer 用於判斷是否可查看案件的精確座標。
 func (u User) IsVerifiedVolunteer() bool { return u.VolunteerVerifiedAt != nil }
 
@@ -134,6 +147,57 @@ func (r *UserRepo) SetVolunteerVerified(ctx context.Context, userID string, veri
 		     WHERE id = $1::uuid AND deleted_at IS NULL`
 	}
 	tag, err := r.db.Exec(ctx, q, userID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// AdminUserListRow 是管理後台使用者列表的一列。刻意不含任何敏感資料：
+// 只顯示顯示名稱、聯絡方式（tg id / 手機）、角色與志願者狀態。
+type AdminUserListRow struct {
+	ID                  string
+	DisplayName         string
+	TelegramID          *int64
+	PhoneE164           *string
+	Role                string
+	VolunteerVerifiedAt *time.Time
+	CreatedAt           time.Time
+}
+
+// ListUsers 列出所有未刪除帳號，新的排前面，供管理後台檢視/調整角色。
+func (r *UserRepo) ListUsers(ctx context.Context, limit int) ([]AdminUserListRow, error) {
+	const q = `
+		SELECT id::text, display_name, telegram_id, phone_e164, role, volunteer_verified_at, created_at
+		FROM users
+		WHERE deleted_at IS NULL
+		ORDER BY created_at DESC
+		LIMIT $1`
+	rows, err := r.db.Query(ctx, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []AdminUserListRow
+	for rows.Next() {
+		var u AdminUserListRow
+		if err := rows.Scan(&u.ID, &u.DisplayName, &u.TelegramID, &u.PhoneE164, &u.Role, &u.VolunteerVerifiedAt, &u.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// SetRole 是「誰有資格用管理後台」的最終開關（users.role：user/admin）。
+// 僅允許兩個值；不要從任何非 admin API 呼叫。
+func (r *UserRepo) SetRole(ctx context.Context, userID, role string) error {
+	const q = `UPDATE users SET role = $2 WHERE id = $1::uuid AND deleted_at IS NULL`
+	tag, err := r.db.Exec(ctx, q, userID, role)
 	if err != nil {
 		return err
 	}

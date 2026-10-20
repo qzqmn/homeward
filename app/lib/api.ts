@@ -5,6 +5,8 @@
 
 import { enqueue, newClientId } from './offlineQueue';
 import type {
+  AdminCaseItem,
+  AdminUserItem,
   Case,
   CaseUpdate,
   Clue,
@@ -365,6 +367,58 @@ export async function adminUpdateReportStatus(
       method: 'PATCH',
       headers: jsonHeaders(deps),
       body: JSON.stringify({ status }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** 所有案件概觀（管理後台）。 */
+export async function adminListCases(deps: SubmitDeps): Promise<AdminCaseItem[] | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/cases`, { headers: authOnlyHeaders(deps) });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { cases: AdminCaseItem[] };
+    return data.cases;
+  } catch {
+    return null;
+  }
+}
+
+/** 管理員改任一案件狀態（下架= closed、復原= open、標記團聚= found）。 */
+export async function adminSetCaseStatus(caseId: string, status: CaseStatus, deps: SubmitDeps): Promise<boolean> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/cases/${caseId}/status`, {
+      method: 'PATCH',
+      headers: jsonHeaders(deps),
+      body: JSON.stringify({ status }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** 使用者概觀（管理後台）。 */
+export async function adminListUsers(deps: SubmitDeps): Promise<AdminUserItem[] | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/users`, { headers: authOnlyHeaders(deps) });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { users: AdminUserItem[] };
+    return data.users;
+  } catch {
+    return null;
+  }
+}
+
+/** 升級/撤銷管理員（管理後台）。 */
+export async function adminSetUserRole(userId: string, role: 'user' | 'admin', deps: SubmitDeps): Promise<boolean> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/users/${userId}/role`, {
+      method: 'POST',
+      headers: jsonHeaders(deps),
+      body: JSON.stringify({ role }),
     });
     return res.ok;
   } catch {

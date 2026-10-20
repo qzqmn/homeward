@@ -144,6 +144,36 @@ func (r *CaseRepo) ListByOwner(ctx context.Context, ownerID string, limit int) (
 	return out, rows.Err()
 }
 
+// ListAll 列出最近建立的所有案件（不限狀態）——管理後台用的概觀列表，
+// 新建在前。這是審核工具性列表：只回基本欄位，不含座標以外的隱私內容。
+func (r *CaseRepo) ListAll(ctx context.Context, limit int) ([]Case, error) {
+	const q = `
+		SELECT id::text, case_type, status, title, description, last_seen_at,
+		       ST_X(public_center), ST_Y(public_center),
+		       ST_X(public_center), ST_Y(public_center),
+		       search_radius_m, police_report_no, photo_path, owner_id::text, created_at
+		FROM cases
+		ORDER BY created_at DESC
+		LIMIT $1`
+	rows, err := r.db.Query(ctx, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Case
+	for rows.Next() {
+		var c Case
+		if err := rows.Scan(&c.ID, &c.CaseType, &c.Status, &c.Title, &c.Description, &c.LastSeenAt,
+			&c.Lng, &c.Lat, &c.PublicLng, &c.PublicLat,
+			&c.SearchRadiusM, &c.PoliceReportNo, &c.PhotoPath, &c.OwnerID, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // UpdateStatus 處理結案／標記尋回（PATCH /cases/:id 的底層邏輯）。
 func (r *CaseRepo) UpdateStatus(ctx context.Context, id, status string) error {
 	const q = `UPDATE cases SET status = $2, updated_at = now() WHERE id = $1::uuid`

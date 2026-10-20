@@ -88,3 +88,22 @@ export interface MeInfo {
   volunteer_requested: boolean;
   is_admin: boolean;
 }
+
+/** 對應後端 GET /api/v1/admin/cases 的一列（所有案件概觀）。 */
+export interface AdminCaseItem {
+  id: string;
+  title: string;
+  case_type: string;
+  status: string;
+  created_at: string;
+}
+
+/** 對應後端 GET /api/v1/admin/users 的一列（使用者概觀）。 */
+export interface AdminUserItem {
+  id: string;
+  contact: string;
+  role: string; // user / admin
+  volunteer: boolean;
+  name: string | null;
+  joined: string;
+}

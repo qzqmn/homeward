@@ -7,6 +7,7 @@ import { HomeScreen } from './screens/HomeScreen';
 import { CaseDetailScreen } from './screens/CaseDetailScreen';
 import { ReportCaseScreen } from './screens/ReportCaseScreen';
 import { AccountScreen } from './screens/AccountScreen';
+import { AdminScreen } from './screens/AdminScreen';
 import { TrackSearchScreen } from './screens/TrackSearchScreen';
 import { LoginScreen } from './screens/LoginScreen';
 import { pendingCount as readPendingCount } from './lib/offlineQueue';
@@ -23,7 +24,8 @@ type Route =
   | { name: 'detail'; item: Case }
   | { name: 'search'; item: Case }
   | { name: 'report' }
-  | { name: 'account' };
+  | { name: 'account' }
+  | { name: 'admin' };
 
 const CASE_PATH_RE = /^\/cases\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
 
@@ -124,6 +126,18 @@ export default function App() {
             onBack={goHome}
             onOpenCase={(item) => openRoute({ name: 'detail', item })}
             onRequireLogin={() => setLoginReturnTo(route)}
+            onOpenAdmin={() => openRoute({ name: 'admin' })}
+          />
+        )}
+        {route.name === 'admin' && (
+          <AdminScreen
+            apiBaseUrl={API_BASE_URL}
+            onBack={goHome}
+            onOpenCase={(id) => {
+              void getCase(id, { apiBaseUrl: API_BASE_URL, getAuthToken }).then((cs) => {
+                if (cs) openRoute({ name: 'detail', item: cs });
+              });
+            }}
           />
         )}
 

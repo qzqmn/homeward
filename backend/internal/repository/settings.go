@@ -21,6 +21,10 @@ const (
 	SettingsKeyResendAPIKey  = "resend_api_key"
 	SettingsKeyResendFrom    = "resend_from"
 	SettingsKeyNotifyWebhook = "notify_webhook_url"
+	// web_push 的 VAPID 金鑰對：第一次啟動自動生成並存入 app_settings
+	//（公鑰給瀏覽器訂閱、私鑰寄推播；管理後台 GET 不回私鑰）。
+	SettingsKeyWebPushPublic  = "webpush_public_key"
+	SettingsKeyWebPushPrivate = "webpush_private_key"
 )
 
 // Get 回傳 (值, 是否設定過)。未設定過回 ("", false, nil)；連線錯誤照樣回傳錯誤。

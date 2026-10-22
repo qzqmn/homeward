@@ -5,6 +5,7 @@ import MapView from '../lib/MapView';
 import { Button } from '../components/Button';
 import { StatusPill } from '../components/StatusPill';
 import {
+  addCasePhoto,
   listClues,
   listMatches,
   listUpdates,
@@ -69,6 +70,33 @@ export function CaseDetailScreen({
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState('');
 
+  // 一案多張：補傳現場照片（案主/認證志願者；封面照之外，上限後端 12 張）
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [photoMessage, setPhotoMessage] = useState('');
+  /** 相冊裡正在點開大圖的照片（與「點開線索照片」共用 viewer）。 */
+  const [gallery, setGallery] = useState<string[]>(initialItem.photo_urls ?? []);
+
+  const pickCasePhoto = async () => {
+    if (!token) {
+      onRequireLogin();
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7 });
+    if (result.canceled || !result.assets[0]) return;
+    setUploadingPhoto(true);
+    setPhotoMessage('');
+    const blob = await (await fetch(result.assets[0].uri)).blob();
+    const updated = await addCasePhoto(initialItem.id, blob, { apiBaseUrl, getAuthToken });
+    setUploadingPhoto(false);
+    if (!updated) {
+      setPhotoMessage('上傳失敗，請稍後再試');
+      return;
+    }
+    setItem(updated);
+    setGallery(updated.photo_urls ?? []);
+    setPhotoMessage('照片已加入案件相冊');
+  };
+
   // 登入狀態（含登入完成的即時變化）本頁自己訂閱：案主登入後要立刻重查
   // 精確座標與線索列表，不需要重導路由。
   const { token, user } = useAuth();
@@ -84,6 +112,7 @@ export function CaseDetailScreen({
       .then((data) => {
         if (!data) return;
         setItem(data);
+        setGallery(data.photo_urls ?? []);
         const canViewClues = data.is_owner || user?.verified_volunteer;
         if (token && canViewClues) {
           void listClues(initialItem.id, deps).then((cs) => setClues(cs));
@@ -218,6 +247,34 @@ export function CaseDetailScreen({
             <Text style={styles.heroEmoji}>{typeEmoji[item.case_type]}</Text>
           </View>
         )}
+
+        {/* 多張相冊：補傳的現場照片（封面之外）。橫向滑動，點開共用的全螢幕檢視器。 */}
+        {gallery.length > 0 ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.galleryRow} contentContainerStyle={styles.galleryContent}>
+            {gallery.map((url, i) => (
+              <Pressable key={`${url}-${i}`} onPress={() => setViewerPhoto(url)}>
+                <Image source={{ uri: url }} style={styles.galleryItem} resizeMode="cover" />
+              </Pressable>
+            ))}
+            {item.is_owner || user?.verified_volunteer ? (
+              <Pressable style={[styles.galleryItem, styles.galleryAdd]} onPress={() => void pickCasePhoto()} disabled={uploadingPhoto}>
+                <Text style={styles.heroEmoji}>{uploadingPhoto ? '⏳' : '＋'}</Text>
+              </Pressable>
+            ) : null}
+          </ScrollView>
+        ) : null}
+        {gallery.length === 0 && (item.is_owner || user?.verified_volunteer) ? (
+          <View style={styles.ctaRow}>
+            <Button
+              label={uploadingPhoto ? '上傳中…' : '＋ 補傳現場照片'}
+              variant="ghost"
+              onPress={() => void pickCasePhoto()}
+              loading={uploadingPhoto}
+              fullWidth
+            />
+          </View>
+        ) : null}
+        {photoMessage ? <Text style={styles.clueEmpty}>{photoMessage}</Text> : null}
 
       <Text style={styles.title}>{item.title}</Text>
       <View style={styles.metaRow}>
@@ -484,6 +541,10 @@ const styles = StyleSheet.create({
   hero: { width: '100%', aspectRatio: 1.3, borderRadius: radius.photo, backgroundColor: color.surfaceAlt },
   heroPlaceholder: { alignItems: 'center', justifyContent: 'center', backgroundColor: color.homeSoft },
   heroEmoji: { fontSize: 64 },
+  galleryRow: { marginTop: space.sm },
+  galleryContent: { gap: space.sm },
+  galleryItem: { width: 104, height: 78, borderRadius: radius.photo, backgroundColor: color.surfaceAlt },
+  galleryAdd: { alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: color.border, borderStyle: 'dashed' },
   title: { ...t.titleXL, color: color.ink, marginTop: space.sm },
   metaRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flexWrap: 'wrap' },
   meta: { ...t.caption, color: color.inkSoft },

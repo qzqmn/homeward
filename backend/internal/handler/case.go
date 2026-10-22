@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"regexp"
@@ -35,7 +36,9 @@ type CaseHandler struct {
 	Users    *repository.UserRepo
 	Matching *service.MatchingService
 	Notify   *service.NotifyService
-	Updates  *repository.UpdateRepo // 案件時間軸（nil 時跳過，方便測試）
+	Updates  *repository.UpdateRepo    // 案件時間軸（nil 時跳過，方便測試）
+	Photos   *repository.CasePhotoRepo // 補傳現場照片（nil 時 Get 不回 photo_urls）
+	Uploader *PhotoHandler             // 補傳照片共用同一條安全上傳管道（nil 時無法補傳）
 }
 
 var validCaseStatuses = map[string]bool{"open": true, "found": true, "closed": true}
@@ -186,6 +189,65 @@ func (h *CaseHandler) UpdateStatus(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// maxCasePhotos 一案補傳照片上限（含封面照之外的 case_photos 總數）。
+const maxCasePhotos = 12
+
+// AddPhoto 處理 POST /api/v1/cases/:id/photos（multipart/form-data，欄位 "photo"）：
+// 案主或認證志願者補傳現場對比照。走 upload-photo 同一條編碼剝 EXIF 的管道。
+func (h *CaseHandler) AddPhoto(c *gin.Context) {
+	if h.Photos == nil || h.Uploader == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo upload not configured"})
+		return
+	}
+	id := c.Param("id")
+	if !uuidRe.MatchString(id) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid case id"})
+		return
+	}
+	userID, _ := middleware.UserID(c) // 路由已掛 requireAuth
+	user, err := h.Users.GetByID(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load user"})
+		return
+	}
+	if !user.IsVerifiedVolunteer() {
+		// 不是志願者 → 只能是案主本人補傳
+		cs, err := h.Cases.GetByID(c.Request.Context(), id)
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "case not found"})
+			return
+		}
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load case"})
+			return
+		}
+		if cs.OwnerID == nil || *cs.OwnerID != userID {
+			c.JSON(http.StatusForbidden, gin.H{"error": "only the case owner or a verified volunteer can add photos"})
+			return
+		}
+	}
+
+	n, err := h.Photos.CountForCase(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count photos"})
+		return
+	}
+	if n >= maxCasePhotos {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("photo limit reached (max %d)", maxCasePhotos)})
+		return
+	}
+
+	rel, ok := h.Uploader.saveImage(c)
+	if !ok {
+		return
+	}
+	if err := h.Photos.Add(c.Request.Context(), id, rel, userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save photo record"})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"path": rel, "url": "/media/" + rel})
+}
+
 // ListMine 處理 GET /api/v1/me/cases：回傳登入者建立的所有案件（含已結案的），
 // 讓案主可以在「我的案件」清單找到自己發過的案子，不再只能從附近清單撈
 // （結案後案件會從附近清單消失，案主就再也找不到）。
@@ -225,7 +287,21 @@ func (h *CaseHandler) Get(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, caseJSON(cs, h.canSeePrecise(c, cs), h.isOwnerOf(c, cs)))
+	j := caseJSON(cs, h.canSeePrecise(c, cs), h.isOwnerOf(c, cs))
+	// 補傳的現場照片（封面照之外）：詳情頁相冊用
+	if h.Photos != nil {
+		paths, err := h.Photos.List(c.Request.Context(), id)
+		if err != nil {
+			log.Printf("WARN: list case_photos for %s: %v", id, err)
+		} else if len(paths) > 0 {
+			urls := make([]string, len(paths))
+			for i, p := range paths {
+				urls[i] = "/media/" + p
+			}
+			j["photo_urls"] = urls
+		}
+	}
+	c.JSON(http.StatusOK, j)
 }
 
 // canSeePrecise：本人的案件，或已通過志願者認證的登入使用者，才能看精確座標。

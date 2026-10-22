@@ -3,6 +3,8 @@ import { API_BASE_URL } from './config';
 
 export interface AppConfig {
   telegramBotUsername: string;
+  /** web_push 的 VAPID 公鑰（空字串 = 瀏覽器推播未啟用）。空值時不顯示訂閱入口。 */
+  vapidPublicKey: string;
 }
 
 /**
@@ -17,9 +19,13 @@ export function useAppConfig(): { config: AppConfig | null; loading: boolean } {
   useEffect(() => {
     let cancelled = false;
     fetch(`${API_BASE_URL}/api/v1/config`)
-      .then((res) => (res.ok ? (res.json() as Promise<{ telegram_bot_username: string }>) : null))
+      .then((res) => (res.ok ? (res.json() as Promise<{ telegram_bot_username: string; vapid_public_key?: string }>) : null))
       .then((data) => {
-        if (!cancelled && data) setConfig({ telegramBotUsername: data.telegram_bot_username });
+        if (!cancelled && data)
+          setConfig({
+            telegramBotUsername: data.telegram_bot_username,
+            vapidPublicKey: data.vapid_public_key ?? '',
+          });
       })
       .catch(() => {})
       .finally(() => {

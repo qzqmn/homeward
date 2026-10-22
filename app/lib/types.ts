@@ -16,6 +16,25 @@ export interface Case {
   search_radius_m: number;
   police_report_no: string | null;
   photo_url: string | null;
+  /** 補傳的現場照片（案主/認證志願者可上傳；封面之外的多張相冊）。 */
+  photo_urls?: string[];
+  created_at: string;
+}
+
+/** 對應後端 GET /api/v1/cases/:id/tasks 的一筆搜索任務（斷點續傳）。 */
+export interface SearchTask {
+  id: string;
+  case_id: string;
+  title: string;
+  note: string;
+  /** open | claimed | done */
+  status: 'open' | 'claimed' | 'done';
+  /** 這份清單請求是我自己的 → 我可以記進度/完成/退回。 */
+  claimed_by_me: boolean;
+  /** 認領者最後一次回報的進度。 */
+  progress_note: string | null;
+  last_point?: { lng: number; lat: number };
+  done_at?: string;
   created_at: string;
 }
 

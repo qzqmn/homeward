@@ -30,9 +30,10 @@ type PhotoHandler struct {
 	MaxBytes int64
 }
 
-// Upload 處理 POST /api/v1/cases/upload-photo（multipart/form-data，欄位名 "photo"）。
-// 圖片依年/月分目錄存入 NAS，回傳相對路徑（之後寫入 clues.photo_path）與可公開讀取的 URL。
-func (h *PhotoHandler) Upload(c *gin.Context) {
+// saveImage 處理 multipart 上傳圖片（限大小、內容嗅探、重新編碼剝 EXIF、
+// 寫入 NAS 年月目錄）。成功回相對路徑；任何問題都已寫好錯誤回應並回 false。
+// Upload 與「案件補傳照片」共用同一條安全管道。
+func (h *PhotoHandler) saveImage(c *gin.Context) (string, bool) {
 	// 限制整個請求 body 大小，避免惡意大檔耗盡資源
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.MaxBytes+(1<<20))
 
@@ -41,20 +42,20 @@ func (h *PhotoHandler) Upload(c *gin.Context) {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
 			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "file too large"})
-			return
+			return "", false
 		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": `missing form file "photo"`})
-		return
+		return "", false
 	}
 	if fh.Size > h.MaxBytes {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "file too large"})
-		return
+		return "", false
 	}
 
 	src, err := fh.Open()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot read upload"})
-		return
+		return "", false
 	}
 	defer src.Close()
 
@@ -63,17 +64,17 @@ func (h *PhotoHandler) Upload(c *gin.Context) {
 	n, err := io.ReadFull(src, head)
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot read upload"})
-		return
+		return "", false
 	}
 	contentType := http.DetectContentType(head[:n])
 	ext, ok := allowedTypes[contentType]
 	if !ok {
 		c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "only jpeg/png allowed"})
-		return
+		return "", false
 	}
 	if _, err := src.Seek(0, io.SeekStart); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot read upload"})
-		return
+		return "", false
 	}
 
 	// 重新編碼剝除 metadata：手機照片多帶 GPS 座標，而 /media/ 是公開目錄，
@@ -81,14 +82,14 @@ func (h *PhotoHandler) Upload(c *gin.Context) {
 	stripped, err := media.Strip(src, contentType)
 	if err != nil {
 		c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "invalid image content"})
-		return
+		return "", false
 	}
 
 	// 隨機檔名，避免衝突與路徑穿越；相對路徑用 "/" 分隔（DB 與 URL 通用）
 	name, err := randomName()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-		return
+		return "", false
 	}
 	now := time.Now()
 	rel := path.Join(now.Format("2006"), now.Format("01"), name+ext)
@@ -96,25 +97,34 @@ func (h *PhotoHandler) Upload(c *gin.Context) {
 
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot create media dir"})
-		return
+		return "", false
 	}
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644) // 0644：讓 Nginx 可讀
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot write file"})
-		return
+		return "", false
 	}
 	if _, err := io.Copy(out, stripped); err != nil {
 		out.Close()
 		os.Remove(dst)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot write file"})
-		return
+		return "", false
 	}
 	if err := out.Close(); err != nil {
 		os.Remove(dst)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot write file"})
+		return "", false
+	}
+	return rel, true
+}
+
+// Upload 處理 POST /api/v1/cases/upload-photo（multipart/form-data，欄位名 "photo"）。
+// 圖片依年/月分目錄存入 NAS，回傳相對路徑（之後寫入 clues.photo_path）與可公開讀取的 URL。
+func (h *PhotoHandler) Upload(c *gin.Context) {
+	rel, ok := h.saveImage(c)
+	if !ok {
 		return
 	}
-
 	c.JSON(http.StatusCreated, gin.H{
 		"path": rel,
 		"url":  "/media/" + rel, // Nginx 直接從 NAS 讀取

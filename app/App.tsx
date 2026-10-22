@@ -15,6 +15,7 @@ import { SyncManager } from './lib/syncManager';
 import { API_BASE_URL } from './lib/config';
 import { getAuthToken } from './lib/authStore';
 import { useAuth } from './lib/useAuth';
+import { useAppConfig } from './lib/useAppConfig';
 import { getCase } from './lib/api';
 import type { Case } from './lib/types';
 import { color } from './theme/tokens';
@@ -37,6 +38,7 @@ export default function App() {
   const [loginReturnTo, setLoginReturnTo] = useState<Route | null>(null);
   const [pending, setPending] = useState(0);
   const { user } = useAuth();
+  const { config: appCfg, loading: appCfgLoading } = useAppConfig();
 
   const refreshPending = useCallback(() => {
     readPendingCount().then(setPending);
@@ -127,6 +129,7 @@ export default function App() {
             onOpenCase={(item) => openRoute({ name: 'detail', item })}
             onRequireLogin={() => setLoginReturnTo(route)}
             onOpenAdmin={() => openRoute({ name: 'admin' })}
+            vapidPublicKey={appCfgLoading ? '' : appCfg?.vapidPublicKey ?? ''}
           />
         )}
         {route.name === 'admin' && (

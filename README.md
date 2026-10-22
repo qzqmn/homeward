@@ -17,7 +17,8 @@ homeward/
 │   │                             # 000007 通知多渠道唯一索引修正（每渠道一筆）＋FK 索引
 │   │                             # 000008 志願者申請欄位（volunteer_requested_at）/
 │   │                             # 000009 users.email＋app_settings（Resend 等）/ 000010 email 納入身份約束 /
-│   │                             # 000011 username/password_hash（帳號密碼登入）
+│   │                             # 000011 username/password_hash（帳號密碼登入）/ 000012 case_photos（一案多張）/
+│   │                             # 000013 search_tasks（搜索任務、斷點續傳）
 ├── backend/                     # Go API
 │   ├── Dockerfile
 │   ├── cmd/server/main.go
@@ -80,7 +81,7 @@ IndexedDB 佇列，不靠 SW。桌面瀏覽器（≥760px）會用置中響應�
 ## API 一覽（`/api/v1`）
 | 方法/路徑 | 說明 | 認證 |
 |---|---|---|
-| `GET /config` | 前端啟動時讀取的公開設定（目前只有 Telegram bot username，絕不放密鑰） | 無 |
+| `GET /config` | 前端啟動時讀取的公開設定（Telegram bot username + web_push 的 VAPID 公鑰，絕不放密鑰） | 無 |
 | `POST /auth/telegram` | Telegram Login Widget 驗證，回傳登入 token（目前前端用的登入方式） | 無 |
 | `POST /auth/otp/request` | 發送手機 OTP（每 IP 5 次/分鐘； SMS 網關未接，現僅 Email OTP 可用） | 無 |
 | `POST /auth/otp/verify` | 驗證 OTP，回傳登入 token（同上） | 無 |
@@ -107,6 +108,13 @@ IndexedDB 佇列，不靠 SW。桌面瀏覽器（≥760px）會用置中響應�
 | `GET /cases/:id/clues` | 案件的目擊線索列表（僅案主本人或認證志願者可看） | 需登入 |
 | `PATCH /cases/:id/clues/:clueId/status` | 案主審核線索（`credible`/`dismissed`/`pending` 撤銷） | 僅案主 |
 | `GET /cases/:id/updates` | 案件時間軸（建立/線索/審核/結案等事件，案主與志願者可看） | 需登入 |
+| `POST /cases/:id/photos` | 補傳現場照片（一案多張，封面之外；案主或已認證志願者；每案上限 12 張；同樣重新編碼剝 EXIF） | 需登入 |
+| `GET /cases/:id/tasks` | 搜索任務清單（案主/認證志願者；任務含認領狀態與最後進度斷點） | 需登入 |
+| `POST /cases/:id/tasks` | 案主建立搜索任務（`title` 必填 + 選填 `note`；每 IP 20 次/分鐘） | 僅案主 |
+| `POST /cases/:id/tasks/:taskId/claim` | 志願者認領一塊搜索任務 | 需登入 |
+| `POST /cases/:id/tasks/:taskId/release` | 退回任務（任務回到 open，進度保留給下一棒） | 僅認領者 |
+| `POST /cases/:id/tasks/:taskId/progress` | 回報進度斷點（`note` + 當前 `lng/lat`，換人接手不漏資訊） | 僅認領者 |
+| `POST /cases/:id/tasks/:taskId/done` | 標記任務完成 | 僅認領者 |
 | `POST /reports` | 舉報案件／線索／使用者（詐騙/騷擾/隱私/垃圾；每 IP 5 次/分鐘） | 需登入 |
 | `GET /admin/volunteer-requests` | 志願者申請清單 | 僅管理員 |
 | `POST /admin/volunteer-requests/:userId` | 通過／撤銷志願者認證 | 僅管理員 |
@@ -129,8 +137,13 @@ IndexedDB 佇列，不靠 SW。桌面瀏覽器（≥760px）會用置中響應�
 | `GET /c/:id`（根路徑，非 `/api/v1`） | 分享預覽頁：給 WhatsApp/Facebook/Telegram 爬蟲讀 OG meta，真人點擊會自動轉去 PWA | 無 |
 
 尚未實作／刻意不做：真手機 SMS 網關（`/auth/otp/*` 走 log，登入請用 Telegram
-或 Email）；web_push 瀏覽器推播（需 VAPID 金鑰＋訂閱流程，暫由 webhook 轉發）；
-搜索任務清單與斷點續傳；一案多張照片。
+或 Email；web_push 瀏覽器推播**已實作**——後端首次啟動自動生成 VAPID 金鑰對
+存進 app_settings，`GET /api/v1/config` 下發公鑰，前端「帳號」頁開啟後訂閱存進
+`user_channels`（channel=`web_push`），通知佇列直發、訂閵失效（404/410）自動清掉死訂閵；
+搜索任務清單與斷點續傳**已實作**——migration `000013`、案主在搜索頁切塊派工，
+志願者認領 → 記進度（文字+當前位置）→ 完成，退回後任務回 open、進度留給下一棒；
+一案多張照片**已實作**——migration `000012`、`POST /cases/:id/photos` 補傳
+（案主或認證志願者，每案上限 12 張，詳情頁橫向相冊展示）。
 （時間軸、舉報、志願者申請/審核、配對建議、SOS、系統設定畫面均已補上。）
 
 主線「發案 → 路人回報線索 → 案主收通知並看到線索 → 結案」已打通：
@@ -244,7 +257,7 @@ Telegram user id>`（逗號可放多個），名單內的帳號一登入就自�
 
 ## 通知送達（管理後台設定）
 
-通知現在有三條路徑，按優先順序：
+通知現在有四條路徑，按優先順序：
 
 1. **Email → Resend 直接寄**：到 [resend.com](https://resend.com) 註冊免費帳號（100 封/天），
    拿 API key、驗證寄信網域，然後在 **管理後台 → 設定** 分頁填入
@@ -252,9 +265,10 @@ Telegram user id>`（逗號可放多個），名單內的帳號一登入就自�
    「Email 驗證碼」分頁會寄 6 位驗證碼）。
 2. **Telegram → Bot API 直接發**：`.env` 的 `TELEGRAM_BOT_TOKEN` 現在也用來發通知訊息。
    注意：Telegram 規定使用者必須先跟你的 bot 對話過（按 Start）bot 才能發訊息，提醒志願者先跟 bot 說一聲。
-3. **webhook 轉發**（選填）：在管理後台「設定」→ 通知轉發 webhook 填網址，whatsapp/web_push 或自訂
-   通道靠這條。後端把每則通知 POST 過去：
-
+3. **web_push 瀏覽器推播 → VAPID 直接發**：「帳號」頁點「開啟瀏覽器推播」，後端生成
+   VAPID 金鑰（存在 app_settings）並經 webpush 協議直推瀏覽器；不用 Telegram、不用自架任何東西。
+   訂閵失效（卸載 PWA/清除網站資料）後端會自動清掉死訂閵。
+4. **webhook 轉發**（選填，前三者都沒接通的渠道 fallback）：在管理後台「設定」→ 通知轉發 webhook 填網址，
 ```json
 {
   "channel": "telegram",

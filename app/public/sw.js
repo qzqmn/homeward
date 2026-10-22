@@ -67,3 +67,37 @@ self.addEventListener('fetch', (event) => {
     }),
   );
 });
+
+// ---- Web Push（瀏覽器推播收到後顯示通知；payload 由後端 service/webpush.go 組）----
+self.addEventListener('push', (event) => {
+  let data = { title: '歸途 Homeward', body: '', url: '/' };
+  try {
+    if (event.data) data = Object.assign(data, event.data.json());
+  } catch (e) {
+    // 非 JSON payload 就用預設文案
+  }
+  // tag/renotify：同一案件的後續更新也能再彈一次，不會被前一則完全吞掉
+  const options = {
+    body: data.body,
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    tag: 'homeward-' + Date.now(),
+    renotify: true,
+    data: { url: data.url || '/' },
+  };
+  event.waitUntil(self.registration.showNotification(data.title, options));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const target = (event.notification.data && event.notification.data.url) || '/';
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      const path = new URL(target, self.location.origin).pathname;
+      for (const client of list) {
+        if (new URL(client.url).pathname === path && 'focus' in client) return client.focus();
+      }
+      return self.clients.openWindow(target);
+    }),
+  );
+});

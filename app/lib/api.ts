@@ -15,6 +15,7 @@ import type {
   MatchSuggestion,
   MeInfo,
   ReportRecord,
+  SearchTask,
   SosAdminItem,
   VolunteerRequest,
   WatchArea,
@@ -245,6 +246,111 @@ export async function listUpdates(caseId: string, deps: SubmitDeps): Promise<Cas
     if (!res.ok) return null;
     const data = (await res.json()) as { updates: CaseUpdate[] };
     return data.updates;
+  } catch {
+    return null;
+  }
+}
+
+// ---- 搜索任務（斷點續傳；案主建任務、志願者認領/記進度/完成）----
+
+/** 任務清單；403/失敗回 null。 */
+export async function listTasks(caseId: string, deps: SubmitDeps): Promise<SearchTask[] | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${caseId}/tasks`, {
+      headers: authOnlyHeaders(deps),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { tasks: SearchTask[] };
+    return data.tasks;
+  } catch {
+    return null;
+  }
+}
+
+/** 案主/管理員建立任務；成功回新任務（status 通常 open）。 */
+export async function createTask(
+  caseId: string,
+  input: { title: string; note?: string },
+  deps: SubmitDeps,
+): Promise<SearchTask | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${caseId}/tasks`, {
+      method: 'POST',
+      headers: jsonHeaders(deps),
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as SearchTask;
+  } catch {
+    return null;
+  }
+}
+
+/** 認領/退回：同一組語意的兩個端點，回更新後的任務。 */
+async function taskTransition(caseId: string, taskId: string, action: string, deps: SubmitDeps): Promise<SearchTask | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${caseId}/tasks/${taskId}/${action}`, {
+      method: 'POST',
+      headers: authOnlyHeaders(deps),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as SearchTask;
+  } catch {
+    return null;
+  }
+}
+
+export const claimTask = (caseId: string, taskId: string, deps: SubmitDeps) =>
+  taskTransition(caseId, taskId, 'claim', deps);
+export const releaseTask = (caseId: string, taskId: string, deps: SubmitDeps) =>
+  taskTransition(caseId, taskId, 'release', deps);
+
+/** 回報進度（斷點）：note + 當前位置。 */
+export async function taskProgress(
+  caseId: string,
+  taskId: string,
+  input: { note: string; lng: number; lat: number },
+  deps: SubmitDeps,
+): Promise<SearchTask | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${caseId}/tasks/${taskId}/progress`, {
+      method: 'POST',
+      headers: jsonHeaders(deps),
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as SearchTask;
+  } catch {
+    return null;
+  }
+}
+
+/** 標記任務完成。 */
+export async function taskDone(caseId: string, taskId: string, deps: SubmitDeps): Promise<SearchTask | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${caseId}/tasks/${taskId}/done`, {
+      method: 'POST',
+      headers: authOnlyHeaders(deps),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as SearchTask;
+  } catch {
+    return null;
+  }
+}
+
+/** 補傳現場照片（一案多張）：直接上傳到 /cases/:id/photos，回更新後案件。 */
+export async function addCasePhoto(caseId: string, blob: Blob, deps: SubmitDeps): Promise<Case | null> {
+  try {
+    const form = new FormData();
+    form.append('photo', blob, 'photo.jpg');
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${caseId}/photos`, {
+      method: 'POST',
+      headers: authOnlyHeaders(deps),
+      body: form,
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as Case;
   } catch {
     return null;
   }
@@ -545,6 +651,20 @@ export async function clearWatchArea(deps: SubmitDeps): Promise<boolean> {
     const res = await fetch(`${deps.apiBaseUrl}/api/v1/me/watch-area`, {
       method: 'DELETE',
       headers: authOnlyHeaders(deps),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** 註冊通知渠道（channel: web_push/telegram/email…；address 由渠道定義）。 */
+export async function registerChannel(channel: string, address: string, deps: SubmitDeps): Promise<boolean> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/me/channels`, {
+      method: 'POST',
+      headers: jsonHeaders(deps),
+      body: JSON.stringify({ channel, address }),
     });
     return res.ok;
   } catch {

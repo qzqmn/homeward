@@ -27,3 +27,12 @@ func (r *ChannelRepo) Register(ctx context.Context, userID, channel, address str
 	_, err := r.db.Exec(ctx, q, userID, channel, address)
 	return err
 }
+
+// Delete 刪除使用者的某個渠道地址（push 訂閱被瀏覽器/伺服器註銷 404/410 時
+// 清掉死訂閱，避免每次通知都打空）。
+func (r *ChannelRepo) Delete(ctx context.Context, userID, channel, address string) error {
+	_, err := r.db.Exec(ctx, `
+		DELETE FROM user_channels
+		WHERE user_id = $1::uuid AND channel = $2 AND address = $3`, userID, channel, address)
+	return err
+}

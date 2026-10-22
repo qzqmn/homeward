@@ -13,6 +13,7 @@ import {
   requestVolunteer,
   setCredential,
 } from '../lib/api';
+import { subscribeWebPush, webPushStatus, unsubscribeWebPush, type PushState as WebPushState } from '../lib/webpush';
 import { getAuthToken, logout } from '../lib/authStore';
 import { useAuth } from '../lib/useAuth';
 import type { Case, MeInfo } from '../lib/types';
@@ -28,6 +29,7 @@ export function AccountScreen({
   onOpenCase,
   onRequireLogin,
   onOpenAdmin,
+  vapidPublicKey,
 }: {
   apiBaseUrl: string;
   onBack: () => void;
@@ -35,6 +37,8 @@ export function AccountScreen({
   onRequireLogin: () => void;
   /** 管理員通往獨立後台（screens/AdminScreen.tsx）的入口。 */
   onOpenAdmin: () => void;
+  /** web_push 的 VAPID 公鑰（GET /config 下發；空 = 瀏覽器推播未啟用）。 */
+  vapidPublicKey: string;
 }) {
   const { token, user } = useAuth();
   const [myCases, setMyCases] = useState<Case[] | null>(null);
@@ -57,6 +61,13 @@ export function AccountScreen({
   const [credCurrent, setCredCurrent] = useState('');
   const [credBusy, setCredBusy] = useState(false);
   const [credMessage, setCredMessage] = useState('');
+
+  // 瀏覽器推播（web_push）：訂閵狀態 + 進/退訂按鈕。（未登入一律視為未追蹤
+  // 狀態——不在 effect 裡同步清 state，由 token 推導。）
+  const [pushState, setPushState] = useState<WebPushState | null>(null);
+  const effectivePushState = token ? pushState : null;
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushMessage, setPushMessage] = useState('');
 
   const deps = { apiBaseUrl, getAuthToken };
 
@@ -107,6 +118,15 @@ export function AccountScreen({
       }
     });
   }, [token, apiBaseUrl]);
+
+  // 瀏覽器推播狀態（登入後才查；未登入不用 effect 同步重置，render 期間推導）
+  useEffect(() => {
+    if (!token) return;
+    void webPushStatus().then((s) => {
+      // 狀態查詢屬資料載入（非同步回呼），非 render 期間的同步 setState
+      setPushState(s);
+    });
+  }, [token]);
 
   const applyVolunteer = async () => {
     setRequestingVolunteer(true);
@@ -174,6 +194,35 @@ export function AccountScreen({
     // 先請後端撤銷 session（真的下線），再清前端 token；後端失敗也照樣登出
     await logoutServer({ apiBaseUrl, getAuthToken });
     logout();
+  };
+
+  const enablePush = async () => {
+    if (!vapidPublicKey) {
+      setPushMessage('伺服器尚未啟用瀏覽器推播');
+      return;
+    }
+    setPushBusy(true);
+    setPushMessage('');
+    const state = await subscribeWebPush(vapidPublicKey, { apiBaseUrl, getAuthToken });
+    setPushBusy(false);
+    setPushState(state);
+    setPushMessage(
+      state === 'subscribed'
+        ? '已開啟！有案件的時候瀏覽器會直接彈通知'
+        : state === 'denied'
+          ? '通知權限被拒絕了；請到瀏覽器設定把這個網站的通知改回允許'
+          : state === 'unsupported'
+            ? '這個瀏覽器/模式不支援推播（私密瀏覽模式下也會不支援）'
+            : '訂閱失敗，請稍後再試',
+    );
+  };
+
+  const disablePush = async () => {
+    setPushBusy(true);
+    const state = await unsubscribeWebPush();
+    setPushBusy(false);
+    setPushState(state);
+    setPushMessage(state === 'subscribed' ? '' : '已關閉瀏覽器推播');
   };
 
   const removeWatchArea = async () => {
@@ -326,6 +375,22 @@ export function AccountScreen({
             fullWidth
           />
           {credMessage ? <Text style={styles.message}>{credMessage}</Text> : null}
+        </View>
+      ) : null}
+
+      {/* ---- 瀏覽器推播（web_push）：訂閵狀態 + 開關 ---- */}
+      {user ? (
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>瀏覽器推播</Text>
+          <Text style={styles.hint}>
+            開啟後不用 Telegram 也能即時收到「附近有案件」和「案主判斷線索可信」的通知。
+          </Text>
+          {effectivePushState === 'subscribed' ? (
+            <Button label="關閉瀏覽器推播" variant="ghost" onPress={() => void disablePush()} loading={pushBusy} fullWidth />
+          ) : (
+            <Button label="開啟瀏覽器推播" onPress={() => void enablePush()} loading={pushBusy} fullWidth />
+          )}
+          {pushMessage ? <Text style={styles.message}>{pushMessage}</Text> : null}
         </View>
       ) : null}
 

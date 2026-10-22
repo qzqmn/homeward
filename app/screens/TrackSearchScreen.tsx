@@ -9,14 +9,24 @@
  * 權限：後端要求登入；未登入按下去直接轉浮層登入。
  */
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import MapView from '../lib/MapView';
 import type { MapCircle } from '../lib/MapView';
 import { Button } from '../components/Button';
-import { getCoverage, submitSos, submitTrack } from '../lib/api';
+import {
+  claimTask,
+  createTask,
+  getCoverage,
+  listTasks,
+  releaseTask,
+  submitSos,
+  submitTrack,
+  taskDone,
+  taskProgress,
+} from '../lib/api';
 import { getAuthToken } from '../lib/authStore';
 import { useAuth } from '../lib/useAuth';
-import type { Case, CoverageCell } from '../lib/types';
+import type { Case, CoverageCell, SearchTask } from '../lib/types';
 import { color, radius, shadow, space, type as t } from '../theme/tokens';
 
 /** 送點間隔：太密沒意義（100m 格網），太疏覆蓋圖失真。 */
@@ -85,6 +95,17 @@ export function TrackSearchScreen({
   const [sosBusy, setSosBusy] = useState(false);
   const [sosSent, setSosSent] = useState(false);
 
+  // 搜索任務（斷點續傳）：案主切塊、志願者認領/記進度/完成
+  const [tasks, setTasks] = useState<SearchTask[] | null>(null);
+  const [taskBusy, setTaskBusy] = useState(false);
+  const [taskError, setTaskError] = useState('');
+  /** 正在輸入進度note的任務id（null = 沒有展開）。 */
+  const [progressTaskId, setProgressTaskId] = useState<string | null>(null);
+  const [progressNote, setProgressNote] = useState('');
+  // 案主建任務表單
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [newTaskNote, setNewTaskNote] = useState('');
+
   // watchId / 定時器都用 ref 管理，確保停止時能精準清掉
   const watchIdRef = useRef<number | null>(null);
   const sendTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -96,6 +117,80 @@ export function TrackSearchScreen({
   const sentCountRef = useRef(0);
 
   const deps = { apiBaseUrl, getAuthToken };
+
+  // ---- 任務清單載入/刷新（未登入不查；tasks 由 token 推導為 null 時不顯示）----
+  const loadTasks = () => {
+    void listTasks(item.id, deps).then((ts) => {
+      // 403（非志願者）回 null → 整段不顯示
+      setTasks(ts);
+    });
+  };
+  useEffect(() => {
+    if (!token) return;
+    loadTasks();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 進入案件/登入狀態變化時重查
+  }, [token, item.id]);
+  const visibleTasks = token ? tasks : null;
+
+  const runTaskAction = async (action: () => Promise<SearchTask | null>, failMsg: string) => {
+    setTaskBusy(true);
+    setTaskError('');
+    const updated = await action();
+    setTaskBusy(false);
+    if (!updated) {
+      setTaskError(failMsg);
+      return;
+    }
+    setTasks((cur) => (cur ?? []).map((tk) => (tk.id === updated.id ? updated : tk)));
+  };
+
+  const submitProgress = async (task: SearchTask) => {
+    if (!lastFix) {
+      setTaskError('先讓定位取到位置（開始搜索）才能記錄進度');
+      return;
+    }
+    if (!progressNote.trim()) {
+      setTaskError('請先寫下進度內容');
+      return;
+    }
+    setTaskBusy(true);
+    const updated = await taskProgress(
+      item.id,
+      task.id,
+      { note: progressNote.trim(), lng: lastFix.lng, lat: lastFix.lat },
+      deps,
+    );
+    setTaskBusy(false);
+    if (!updated) {
+      setTaskError('進度記錄失敗，請稍後再試');
+      return;
+    }
+    setTasks((cur) => (cur ?? []).map((tk) => (tk.id === updated.id ? updated : tk)));
+    setProgressTaskId(null);
+    setProgressNote('');
+  };
+
+  const submitNewTask = async () => {
+    if (!newTaskTitle.trim()) {
+      setTaskError('任務標題不能是空的');
+      return;
+    }
+    setTaskBusy(true);
+    const created = await createTask(
+      item.id,
+      { title: newTaskTitle.trim(), note: newTaskNote.trim() || undefined },
+      deps,
+    );
+    setTaskBusy(false);
+    if (!created) {
+      setTaskError('建立任務失敗，請稍後再試');
+      return;
+    }
+    setTasks((cur) => [created, ...(cur ?? [])]);
+    setNewTaskTitle('');
+    setNewTaskNote('');
+    setTaskError('');
+  };
 
   // 熱圖存 state（已轉成 circles），避免在 render 期間呼叫 Date.now()
   const [circles, setCircles] = useState<MapCircle[]>([]);
@@ -267,6 +362,94 @@ export function TrackSearchScreen({
         ) : (
           <Button label={token ? '開始搜索' : '登入後開始搜索'} onPress={startTracking} fullWidth />
         )}
+        {/* ---- 搜索任務：案主切塊派工，志願者認領/記進度/完成/退回 ---- */}
+        {visibleTasks ? (
+          <View style={styles.taskSection}>
+            <Text style={styles.sectionTitle}>搜索任務（{visibleTasks.length}）</Text>
+            <Text style={styles.hint}>
+              把搜索範圍切成小塊分工；認領後進度會留在任務上，換人接手也不會漏。
+            </Text>
+            {item.is_owner ? (
+              <View style={styles.newTaskRow}>
+                <TextInput
+                  style={styles.taskInput}
+                  placeholder="新任務標題（例：搜屋邨公園A區）"
+                  placeholderTextColor={color.inkSoft}
+                  value={newTaskTitle}
+                  onChangeText={setNewTaskTitle}
+                />
+                <TextInput
+                  style={[styles.taskInput, styles.taskInputNote]}
+                  placeholder="備註（選填）"
+                  placeholderTextColor={color.inkSoft}
+                  value={newTaskNote}
+                  onChangeText={setNewTaskNote}
+                  multiline
+                />
+                <Button label="新增任務" onPress={() => void submitNewTask()} loading={taskBusy} fullWidth />
+              </View>
+            ) : null}
+            {visibleTasks.length === 0 ? (
+              <Text style={styles.taskEmpty}>還沒有任務。{item.is_owner ? '在上面加一個吧。' : ''}</Text>
+            ) : (
+              visibleTasks.map((tk) => (
+                <View key={tk.id} style={styles.taskItem}>
+                  <View style={styles.taskHead}>
+                    <Text style={styles.taskTitle}>{tk.title}</Text>
+                    <Text style={[styles.taskTag, styles[`taskTag_${tk.status}`]]}>
+                      {tk.status === 'open' ? '待認領' : tk.status === 'claimed' ? (tk.claimed_by_me ? '我認領的' : '進行中') : '已完成'}
+                    </Text>
+                  </View>
+                  {tk.note ? <Text style={styles.taskNote}>{tk.note}</Text> : null}
+                  {tk.progress_note ? <Text style={styles.taskProgress}>📌 {tk.progress_note}</Text> : null}
+                  {tk.status === 'open' ? (
+                    <Button
+                      label="認領這塊"
+                      onPress={() => void runTaskAction(() => claimTask(item.id, tk.id, deps), '認領失敗，請稍後再試')}
+                      loading={taskBusy}
+                      fullWidth
+                    />
+                  ) : null}
+                  {tk.status === 'claimed' && tk.claimed_by_me ? (
+                    <>
+                      {progressTaskId === tk.id ? (
+                        <View style={styles.progressForm}>
+                          <TextInput
+                            style={[styles.taskInput, styles.taskInputNote]}
+                            placeholder="目前搜到哪裡/有什麼發現？"
+                            placeholderTextColor={color.inkSoft}
+                            value={progressNote}
+                            onChangeText={setProgressNote}
+                            multiline
+                          />
+                          <Text style={styles.hint}>
+                            {lastFix ? `會記錄你目前的位置（精度約 ${Math.round(lastFix.acc)}m）作為斷點。` : '尚未取得定位——開始搜索後再記錄。'}
+                          </Text>
+                          <View style={styles.taskActions}>
+                            <Button label="記錄進度" onPress={() => void submitProgress(tk)} loading={taskBusy} />
+                            <Button label="取消" variant="ghost" onPress={() => setProgressTaskId(null)} />
+                          </View>
+                        </View>
+                      ) : (
+                        <View style={styles.taskActions}>
+                          <Button label="記錄進度" variant="ghost" onPress={() => { setProgressTaskId(tk.id); setProgressNote(tk.progress_note ?? ''); }} />
+                          <Button label="完成" onPress={() => void runTaskAction(() => taskDone(item.id, tk.id, deps), '標記完成失敗')} loading={taskBusy} />
+                          <Button
+                            label="退回"
+                            variant="ghost"
+                            onPress={() => void runTaskAction(() => releaseTask(item.id, tk.id, deps), '退回失敗')}
+                            loading={taskBusy}
+                          />
+                        </View>
+                      )}
+                    </>
+                  ) : null}
+                </View>
+              ))
+            )}
+            {taskError ? <Text style={styles.errorText}>{taskError}</Text> : null}
+          </View>
+        ) : null}
         <Pressable onPress={onBack} style={styles.backRow}>
           <Text style={styles.backText}>← 返回案件</Text>
         </Pressable>
@@ -299,6 +482,38 @@ const styles = StyleSheet.create({
   statusText: { ...t.bodyMedium, color: color.ink },
   statusTextError: { color: color.urgent },
   errorText: { ...t.caption, color: color.urgent },
+  taskSection: { marginTop: space.md, paddingTop: space.md, borderTopWidth: 1, borderTopColor: color.border },
+  sectionTitle: { ...t.titleM, color: color.ink, marginBottom: space.xs },
+  newTaskRow: { marginTop: space.sm, gap: space.xs },
+  taskInput: {
+    borderWidth: 1,
+    borderColor: color.border,
+    borderRadius: radius.sm,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    color: color.ink,
+    backgroundColor: color.surface,
+    fontSize: 14,
+  },
+  taskInputNote: { minHeight: 64, textAlignVertical: 'top' as const },
+  taskItem: {
+    marginTop: space.sm,
+    padding: space.md,
+    borderRadius: radius.md,
+    backgroundColor: color.surface,
+    ...shadow.card,
+  },
+  taskHead: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flexWrap: 'wrap' },
+  taskTitle: { ...t.titleL, color: color.ink, flexShrink: 1, fontSize: 16, lineHeight: 22 },
+  taskTag: { ...t.caption, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 999, overflow: 'hidden' as const },
+  taskTag_open: { backgroundColor: color.homeSoft, color: color.ink },
+  taskTag_claimed: { backgroundColor: color.hopeSoft, color: color.hope },
+  taskTag_done: { backgroundColor: color.surfaceAlt, color: color.inkSoft },
+  taskNote: { ...t.body, color: color.inkSoft, marginTop: space.xs },
+  taskProgress: { ...t.caption, color: color.ink, marginTop: space.xs },
+  taskActions: { flexDirection: 'row', gap: space.sm, marginTop: space.sm, flexWrap: 'wrap' },
+  progressForm: { marginTop: space.sm, gap: space.xs },
+  taskEmpty: { ...t.body, color: color.inkSoft, marginTop: space.sm },
   backRow: { paddingVertical: space.sm, alignItems: 'center' },
   backText: { ...t.bodyMedium, color: color.inkSoft },
   sosButton: {

@@ -65,6 +65,8 @@ func Build(d Deps) Built {
 	// ---- 組裝各層：repository（DB 存取）→ service（跨表商業邏輯）→ handler（HTTP）----
 	userRepo := repository.NewUserRepo(d.Pg)
 	caseRepo := repository.NewCaseRepo(d.Pg)
+	casePhotoRepo := repository.NewCasePhotoRepo(d.Pg)
+	searchTaskRepo := repository.NewSearchTaskRepo(d.Pg)
 	clueRepo := repository.NewClueRepo(d.Pg)
 	trackRepo := repository.NewTrackRepo(d.Pg)
 	channelRepo := repository.NewChannelRepo(d.Pg)
@@ -79,12 +81,20 @@ func Build(d Deps) Built {
 	settingsSvc := service.NewSettingsService(settingsRepo)
 	mailer := service.NewMailer(settingsSvc, d.Cfg.TelegramBotToken)
 
+	// 瀏覽器推播：首次啟動自動生成 VAPID 金鑰對存進 app_settings
+	pushSvc := service.NewWebPushService(settingsSvc)
+	if err := pushSvc.EnsureKeys(context.Background()); err != nil {
+		log.Printf("WARN: web push keys: %v（瀏覽器推播退回 webhook 後備）", err)
+	}
+
 	authSvc := service.NewAuthService(d.Redis)
 	// Email 登入的驗證碼透過 Resend 寄出（未在管理後台設定 key 時回 ErrNotConfigured）
 	authSvc.EmailSender = mailer.SendOTPEmail
 
 	matchingSvc := service.NewMatchingService(matchRepo)
 	notifySvc := service.NewNotifyService(userRepo, notificationRepo, settingsSvc, mailer, d.Cfg.NotifyWebhookURL, d.Cfg.BaseURL)
+	// web_push 渠道直發 + 死訂閱清理（未啟用時該渠道自動退回 webhook 後備）
+	notifySvc.WithWebPush(pushSvc, channelRepo)
 
 	photoH := &handler.PhotoHandler{MediaDir: d.Cfg.MediaDir, MaxBytes: d.Cfg.MaxUploadBytes}
 	adminH := &handler.AdminHandler{
@@ -102,7 +112,8 @@ func Build(d Deps) Built {
 		TelegramBotToken: d.Cfg.TelegramBotToken,
 		Admin:            adminH, // ADMIN_TELEGRAM_IDS 登入時自動升級
 	}
-	caseH := &handler.CaseHandler{Cases: caseRepo, Users: userRepo, Matching: matchingSvc, Notify: notifySvc, Updates: updateRepo}
+	caseH := &handler.CaseHandler{Cases: caseRepo, Users: userRepo, Matching: matchingSvc, Notify: notifySvc, Updates: updateRepo, Photos: casePhotoRepo, Uploader: photoH}
+	taskH := &handler.TaskHandler{Tasks: searchTaskRepo, Cases: caseRepo, Users: userRepo}
 	clueH := &handler.ClueHandler{Clues: clueRepo, Cases: caseRepo, Users: userRepo, Notify: notifySvc, Updates: updateRepo}
 	trackH := &handler.TrackHandler{Tracks: trackRepo}
 	meH := &handler.MeHandler{Users: userRepo, Channels: channelRepo}
@@ -110,7 +121,10 @@ func Build(d Deps) Built {
 	updateH := &handler.UpdateHandler{Updates: updateRepo, Cases: caseRepo, Users: userRepo}
 	reportH := &handler.ReportHandler{Reports: reportRepo, Users: userRepo}
 	sosH := &handler.SosHandler{Sos: sosRepo, Users: userRepo, Notify: notificationRepo}
-	appConfigH := &handler.AppConfigHandler{TelegramBotUsername: d.Cfg.TelegramBotUsername}
+	appConfigH := &handler.AppConfigHandler{
+		TelegramBotUsername: d.Cfg.TelegramBotUsername,
+		PublicKey:           pushSvc.PublicKey,
+	}
 	shareH := &handler.ShareHandler{Cases: caseRepo, BaseURL: d.Cfg.BaseURL}
 
 	requireAuth := middleware.AuthRequired(authSvc)
@@ -203,6 +217,15 @@ func Build(d Deps) Built {
 			cases.GET("/:id/coverage", trackH.Coverage)                               // 公開：搜索覆蓋熱圖
 			cases.GET("/:id/matches", requireAuth, matchH.List)                       // 配對建議，僅案主可見
 			cases.PATCH("/:id/matches/:matchedId", requireAuth, matchH.UpdateStatus)  // 確認／排除配對建議
+			// 補傳現場照片（案主本人或認證志願者；與 upload-photo 同管道限流）
+			cases.POST("/:id/photos", requireAuth, middleware.RateLimit(d.Redis, "upload", 10, time.Minute), caseH.AddPhoto)
+			// 搜索任務清單（斷點續傳）：建/認領/退回/進度/完成
+			cases.GET("/:id/tasks", requireAuth, taskH.List)
+			cases.POST("/:id/tasks", requireAuth, middleware.RateLimit(d.Redis, "task-write", 20, time.Minute), taskH.Create)
+			cases.POST("/:id/tasks/:taskId/claim", requireAuth, taskH.Claim)
+			cases.POST("/:id/tasks/:taskId/release", requireAuth, taskH.Release)
+			cases.POST("/:id/tasks/:taskId/progress", requireAuth, middleware.RateLimit(d.Redis, "task-write", 20, time.Minute), taskH.Progress)
+			cases.POST("/:id/tasks/:taskId/done", requireAuth, taskH.Done)
 		}
 	}
 	return Built{Engine: r, Notify: notifySvc}

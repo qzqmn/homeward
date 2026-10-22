@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -49,6 +50,10 @@ type NotifyService struct {
 	envWebhookURL string         // .env NOTIFY_WEBHOOK_URL（相容既有部署；管理後台設定優先）
 	baseURL       string         // 對外網域，組 share_url 塞進 payload 用
 	httpClient    *http.Client
+	// web_push 直發（瀏覽器推播；nil 時 web_push 退回 webhook 後備）
+	push *WebPushService
+	// 死推播訂閱清理（404/410 時刪 user_channels）；nil 時只保留佇列重試
+	channels *repository.ChannelRepo
 }
 
 func NewNotifyService(users *repository.UserRepo, notifications *repository.NotificationRepo, settings *SettingsService, mailer *Mailer, envWebhookURL, baseURL string) *NotifyService {
@@ -66,6 +71,13 @@ func NewNotifyService(users *repository.UserRepo, notifications *repository.Noti
 		baseURL:       baseURL,
 		httpClient:    &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+// WithWebPush 啟用瀏覽器推播直發（router 組裝時呼叫）。
+func (s *NotifyService) WithWebPush(push *WebPushService, channels *repository.ChannelRepo) *NotifyService {
+	s.push = push
+	s.channels = channels
+	return s
 }
 
 // EscalateAndEnqueue 依案件建立至今的經過時間，找出目前該用的半徑，為範圍內、
@@ -165,7 +177,7 @@ func (s *NotifyService) DispatchQueued(ctx context.Context, batchSize int) (sent
 	}
 
 	for _, n := range due {
-		if sendErr := s.sendViaChannel(ctx, n.Channel, n.Address, n.Kind, n.Payload); sendErr != nil {
+		if sendErr := s.sendViaChannel(ctx, n.UserID, n.Channel, n.Address, n.Kind, n.Payload); sendErr != nil {
 			_ = s.notifications.MarkSendFailed(ctx, n.ID)
 			failed++
 			continue
@@ -196,13 +208,15 @@ type webhookEnvelope struct {
 // sendViaChannel 決定這則通知實際怎麼送出：
 //  1. channel=email 且 Resend 已在管理後台設定好 → 直接寄（SendEmail）。
 //  2. channel=telegram 且 .env 有 bot token → 走 Bot API 直接發（不用自架 Worker）。
-//  3. 有 webhook（管理後台的 notify_webhook_url，或 .env 的 NOTIFY_WEBHOOK_URL）
-//     → POST 給自架 Worker，由那端轉發（相容既有部署，也是 whatsapp/web_push 的出路）。
-//  4. 什麼都沒有 → 印 log（本機開發；正式環境不會走到這裡）。
+//  3. channel=web_push 且 VAPID 金鑰已生成 → webpush 協議直發；
+//     訂閱失效（404/410）就把死訂閱從 user_channels 刪掉並視為已處理。
+//  4. 有 webhook（管理後台的 notify_webhook_url，或 .env 的 NOTIFY_WEBHOOK_URL）
+//     → POST 給自架 Worker，由那端轉發（相容既有部署，也是 whatsapp 的出路）。
+//  5. 什麼都沒有 → 印 log（本機開發；正式環境不會走到這裡）。
 //
 // 只看 HTTP 狀態碼判斷成功與否：2xx 視為送達，其餘（含逾時、連線失敗）一律
 // 當作失敗，讓這筆通知留在佇列裡等下次重試。
-func (s *NotifyService) sendViaChannel(ctx context.Context, channel, address, kind string, payload []byte) error {
+func (s *NotifyService) sendViaChannel(ctx context.Context, userID, channel, address, kind string, payload []byte) error {
 	snap := s.settings.Snapshot(ctx)
 
 	switch {
@@ -213,6 +227,18 @@ func (s *NotifyService) sendViaChannel(ctx context.Context, channel, address, ki
 	case channel == "telegram" && s.mailer != nil && s.mailer.botToken != "":
 		subject, text := resolveEmailContent(kind, payload)
 		return s.mailer.SendTelegram(ctx, address, subject+"\n"+text)
+
+	case channel == "web_push" && s.push != nil:
+		err := s.push.Send(ctx, address, kind, payload)
+		if errors.Is(err, ErrPushGone) {
+			// 訂閱已被瀏覽器/訊息服務註銷：刪掉死訂閱，通知視為送出
+			//（該使用者若有 email/telegram 渠道，同一案件的佇列會再送一份）。
+			if s.channels != nil && userID != "" {
+				_ = s.channels.Delete(ctx, userID, channel, address)
+			}
+			return nil
+		}
+		return err
 	}
 
 	webhook := snap.WebhookURL

@@ -250,6 +250,7 @@ func (h *AuthHandler) VerifyEmailCode(c *gin.Context) {
 		case errors.Is(err, service.ErrTooManyTries):
 			c.JSON(http.StatusTooManyRequests, gin.H{"error": "嘗試次數過多，請重新發送驗證碼"})
 		default:
+			log.Printf("WARN: verify email code for %s: %v", maskEmail(body.Email), err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "verify failed"})
 		}
 		return
@@ -257,14 +258,18 @@ func (h *AuthHandler) VerifyEmailCode(c *gin.Context) {
 
 	user, err := h.Users.UpsertByEmail(c.Request.Context(), body.Email)
 	if err != nil {
+		log.Printf("WARN: upsert user by email %s: %v", maskEmail(body.Email), err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
 		return
 	}
 	// email 渠道自動註冊：之後 email 通知（案件/線索）直接可用，不用手動填。
-	_ = h.Channels.Register(c.Request.Context(), user.ID, "email", body.Email)
+	if err := h.Channels.Register(c.Request.Context(), user.ID, "email", body.Email); err != nil {
+		log.Printf("WARN: register email channel for user %s: %v", user.ID, err)
+	}
 
 	token, err := h.Auth.IssueSession(c.Request.Context(), user.ID)
 	if err != nil {
+		log.Printf("WARN: issue session for user %s: %v", user.ID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create session"})
 		return
 	}

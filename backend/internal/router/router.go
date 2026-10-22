@@ -133,8 +133,10 @@ func Build(d Deps) Built {
 		// 舉報：登入使用者回報詐騙/騷擾/垃圾內容；限流防灌爆審核清單
 		v1.POST("/reports", requireAuth, middleware.RateLimit(d.Redis, "report-create", 5, time.Minute), reportH.Create)
 
-		// 管理後台（handler 內逐一驗 role='admin'；前端畫面在 /admin 路由）
-		admin := v1.Group("/admin")
+		// 管理後台（handler 內逐一驗 role='admin'；前端畫面在 /admin 路由）。
+		// requireAuth 必掛：handler 的 isAdmin 先讀 AuthRequired 解析出的使用者，
+		// 缺了它 → 所有 admin API 永遠 403（前期測試踩過的坑）。
+		admin := v1.Group("/admin", requireAuth)
 		{
 			admin.GET("/volunteer-requests", adminH.ListVolunteerRequests)
 			admin.POST("/volunteer-requests/:userId", adminH.VerifyVolunteer)

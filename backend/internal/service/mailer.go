@@ -16,8 +16,8 @@ import (
 // Email 寄送一律回這個錯——handler 依它回 503，而不是 500。
 var ErrNotConfigured = errors.New("mailer: not configured")
 
-// resendEndpoint 是 Resend 的寄信 API（https://resend.com/docs）。
-const resendEndpoint = "https://api.resend.com/messages"
+// resendEndpoint 是 Resend 的寄信 API（POST /emails，https://resend.com/docs）。
+const resendEndpoint = "https://api.resend.com/emails"
 
 // telegramAPI 是 Telegram Bot API 的基底網址（token 由 .env 提供，只拿來發訊息）。
 const telegramAPI = "https://api.telegram.org"

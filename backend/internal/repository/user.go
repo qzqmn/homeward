@@ -3,6 +3,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 
@@ -250,21 +251,21 @@ func (r *UserRepo) ClearWatchArea(ctx context.Context, userID string) error {
 
 // GetWatchArea 回傳既有的關注區域；尚未設定過回 ok=false。
 func (r *UserRepo) GetWatchArea(ctx context.Context, userID string) (lng, lat float64, radiusM int, ok bool, err error) {
+	// watch_center 是 PostGIS geometry：ST_X/ST_Y 直接取座標，NULL 時用
+	// sql.NullFloat64 接（pgx 對可空 JSON/array 的掃瞄在很多形狀下都會炸，
+	// 這裡刻意避免把可空值掃進非 nullable 目標）。
 	q := `
-		SELECT watch_radius_m,
-		       CASE WHEN watch_center IS NULL THEN NULL
-		            ELSE JSON_BUILD_ARRAY(ST_X(watch_center), ST_Y(watch_center))
-		       END
+		SELECT watch_radius_m, ST_X(watch_center), ST_Y(watch_center)
 		FROM users WHERE id = $1::uuid`
-	var watch []float64
-	err = r.db.QueryRow(ctx, q, userID).Scan(&radiusM, &watch)
+	var lngN, latN sql.NullFloat64
+	err = r.db.QueryRow(ctx, q, userID).Scan(&radiusM, &lngN, &latN)
 	if err != nil {
 		return 0, 0, 0, false, err
 	}
-	if watch == nil || len(watch) != 2 {
+	if !lngN.Valid || !latN.Valid {
 		return 0, 0, 0, false, nil
 	}
-	return watch[0], watch[1], radiusM, true, nil
+	return lngN.Float64, latN.Float64, radiusM, true, nil
 }
 
 // ListAdminUserIDs 回傳所有 role='admin' 的使用者 id（SOS 求助通知用）。

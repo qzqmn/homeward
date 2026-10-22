@@ -110,13 +110,18 @@ services:
       retries: 10
 
   # ---------- 資料庫備份（每日 pg_dump 到掛載目錄，保留 BACKUP_KEEP 份）----------
-  # 部署時在 .env 設 BACKUP_DIR=/mnt/nas/homeward-backups（與媒體同一台 NAS）
-  # 啟用；啟用前先 `chown` 給 PGID 的擁有者。還原：
+  # 部署時在 .env 設 BACKUP_DIR=/mnt/nas/homeward-backups（與媒體同一台 NAS）；
+  # 啟用前目錄「必須先手動建好」並 `chown` 給 PUID:PGID 擁有者——目錄不存在時
+  # Docker 會替它 chown，在 NFS/CIFS 掛載上會直接報 operation not permitted：
+  #   mkdir -p /mnt/nas/homeward-backups && chown "$(ls -ln /mnt/nas/homeward-media | awk '{print $3":"$4}')"
+  # 還原：
   #   gunzip -c homeward-XXXX.sql.gz | docker exec -i homeward-postgis psql -U $POSTGRES_USER -d $POSTGRES_DB
   db-backup:
     image: imresamu/postgis:16-3.6-bookworm
     container_name: homeward-db-backup
     restart: unless-stopped
+    # 以 PUID:PGID 身份寫備份，確保檔案屬 NAS 目錄擁有者（NFS root_squash 也不受影響）
+    user: "${PUID}:${PGID}"
     entrypoint: ["sh", "/scripts/backup.sh"]
     environment:
       POSTGRES_HOST: postgis-db

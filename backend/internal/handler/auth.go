@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -221,6 +222,7 @@ func (h *AuthHandler) RequestEmailCode(c *gin.Context) {
 	case errors.Is(err, service.ErrNotConfigured):
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "email login not configured"})
 	case err != nil:
+		log.Printf("WARN: send email otp to %s: %v", maskEmail(body.Email), err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to send code"})
 	default:
 		c.JSON(http.StatusOK, gin.H{"message": "code sent"})
@@ -302,4 +304,14 @@ func bearerToken(c *gin.Context) string {
 		return strings.TrimPrefix(h, prefix)
 	}
 	return ""
+}
+
+// maskEmail 在 log 裡遮住 email 本體（a***@domain），避免驗證碼請求的收件人
+// 直接出現在 log。
+func maskEmail(email string) string {
+	at := strings.Index(email, "@")
+	if at <= 1 {
+		return "***" + email[at:]
+	}
+	return email[:1] + "***" + email[at:]
 }

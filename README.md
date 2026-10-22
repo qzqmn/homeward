@@ -283,8 +283,17 @@ log（本機開發用）。
 
 ## 資料庫備份
 docker-compose 內建 `db-backup` 服務：在 `.env` 設 `BACKUP_DIR=/mnt/nas/homeward-backups`
-（NAS 上先 `chown` 給 PGID 擁有者）後重新 `deploy.sh`，就會每天 `pg_dump` 壓縮一份到 NAS，
-保留最近 14 份（`BACKUP_KEEP` 可改）。**沒有任何配置時預設備到 compose 目錄下 `./backups/`。**
+後重新 `deploy.sh`，就會每天 `pg_dump` 壓縮一份到 NAS，保留最近 14 份
+（`BACKUP_KEEP` 可改）。**沒有任何配置時預設備到 compose 目錄下 `./backups/`。**
+
+注意：NAS 子目錄**必須先手動建好**再跑 `deploy.sh`——目錄不存在時 Docker daemon
+會嘗試替它建目錄並 chown，在 NFS/CIFS 掛載上會報
+`chown /mnt/nas/homeward-backups: operation not permitted` 而容器起不來：
+```bash
+mkdir -p /mnt/nas/homeward-backups
+chown $(id -u):$(id -g) /mnt/nas/homeward-backups   # 與 .env 的 PUID:PGID 一致
+```
+（備份容器也以 `PUID:PGID` 身份執行，檔案屬擁有者、NAS root_squash 也不受影響。）
 
 還原方式：
 ```bash

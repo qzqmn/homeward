@@ -69,11 +69,14 @@ func (m *Mailer) SendEmail(ctx context.Context, to, subject, text string) error 
 		return fmt.Errorf("call resend: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body) // 清空 body 以便連線重用
 
+	// 非成功時把 Resend 的回應內容讀出來（它的錯誤訊息會直接說明原因，
+	// 例如「You can only send testing emails to your own address」、域名未驗證等）。
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("resend returned HTTP %d", resp.StatusCode)
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("resend returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(detail)))
 	}
+	io.Copy(io.Discard, resp.Body) // 清空 body 以便連線重用
 	return nil
 }
 

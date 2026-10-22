@@ -163,6 +163,9 @@ func (s *AuthService) RequestEmailCode(ctx context.Context, email string) error 
 	}
 
 	if err := s.EmailSender(ctx, email, code); err != nil {
+		// 寄送失敗立刻解掉冷卻鎖：使用者修正（含管理員改設定）後馬上可重試，
+		// 不用賭 60 秒後才能再試一次。
+		s.rdb.Del(ctx, otpCooldownKey(email))
 		return fmt.Errorf("send email otp: %w", err)
 	}
 	return nil

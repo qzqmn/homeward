@@ -13,7 +13,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import MapView from '../lib/MapView';
 import type { MapCircle } from '../lib/MapView';
 import { Button } from '../components/Button';
-import { getCoverage, submitTrack } from '../lib/api';
+import { getCoverage, submitSos, submitTrack } from '../lib/api';
 import { getAuthToken } from '../lib/authStore';
 import { useAuth } from '../lib/useAuth';
 import type { Case, CoverageCell } from '../lib/types';
@@ -80,6 +80,10 @@ export function TrackSearchScreen({
   const [cells, setCells] = useState<CoverageCell[] | null>(null);
   const [error, setError] = useState('');
   const [permissionDenied, setPermissionDenied] = useState(false);
+
+  // SOS 求救：搜索現場需要人手/支援。以最近一次定位為準（還沒定位過就擋）。
+  const [sosBusy, setSosBusy] = useState(false);
+  const [sosSent, setSosSent] = useState(false);
 
   // watchId / 定時器都用 ref 管理，確保停止時能精準清掉
   const watchIdRef = useRef<number | null>(null);
@@ -236,7 +240,30 @@ export function TrackSearchScreen({
         <Text style={[styles.statusText, permissionDenied && styles.statusTextError]}>{statusText}</Text>
         {error ? <Text style={styles.errorText}>{error}</Text> : null}
         {tracking ? (
-          <Button label="停止搜索" variant="ghost" onPress={stopTracking} fullWidth />
+          <>
+            <Button label="停止搜索" variant="ghost" onPress={stopTracking} fullWidth />
+            {sosSent ? (
+              <Text style={styles.sosText}>🆘 已發出求助，管理員會盡快聯絡你</Text>
+            ) : (
+              <Pressable
+                style={({ pressed }) => [styles.sosButton, pressed && styles.sosButtonPressed]}
+                disabled={sosBusy || !lastFix}
+                onPress={() => {
+                  if (!lastFix) return;
+                  window.confirm('發出 SOS 求救？管理員會收到你的位置。') &&
+                    void (async () => {
+                      setSosBusy(true);
+                      const ok = await submitSos(lastFix.lng, lastFix.lat, `搜索案件：${item.title}`, item.id, deps);
+                      setSosBusy(false);
+                      if (ok) setSosSent(true);
+                      else setError('求救送出失敗，請再按一次');
+                    })();
+                }}
+              >
+                <Text style={styles.sosButtonText}>{sosBusy ? '送出中…' : '🆘 SOS 求救'}</Text>
+              </Pressable>
+            )}
+          </>
         ) : (
           <Button label={token ? '開始搜索' : '登入後開始搜索'} onPress={startTracking} fullWidth />
         )}
@@ -274,4 +301,13 @@ const styles = StyleSheet.create({
   errorText: { ...t.caption, color: color.urgent },
   backRow: { paddingVertical: space.sm, alignItems: 'center' },
   backText: { ...t.bodyMedium, color: color.inkSoft },
+  sosButton: {
+    backgroundColor: color.urgent,
+    borderRadius: radius.pill,
+    paddingVertical: space.md,
+    alignItems: 'center',
+  },
+  sosButtonPressed: { opacity: 0.9 },
+  sosButtonText: { ...t.bodyMedium, color: color.white },
+  sosText: { ...t.bodyMedium, color: color.urgent, textAlign: 'center' },
 });

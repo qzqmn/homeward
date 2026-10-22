@@ -9,10 +9,28 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"homeward/internal/repository"
 )
 
 const notifyBatchSize = 100
+
+// acquireLoopLock 是背景排程的分散式鎖（Redis SET NX EX）：未來如果跑多副本
+// backend，同一時刻只有一個副本會真的執行該輪排程，避免同樣的通知發兩次。
+// 各迴圈各自用不同的鎖名（notify/media-gc/track-retention）。單副本時永遠搶得到，
+// 成本是一次 Redis 往返。
+func acquireLoopLock(ctx context.Context, rdb *redis.Client, name string, ttl time.Duration) bool {
+	if rdb == nil {
+		return true // 測試環境沒給 Redis：單副本假設照舊
+	}
+	ok, err := rdb.SetNX(ctx, "loop-lock:"+name, "1", ttl).Result()
+	if err != nil {
+		log.Printf("WARN: loop lock %s: %v（直接執行）", name, err)
+		return true // Redis 故障時寧可重複也不讓排程停擺
+	}
+	return ok
+}
 
 // 孤兒照片清理參數：上傳後未與任何案件/線索綁定的檔案，保留 72 小時後清除。
 // （客戶端離線逐筆重試時，照片可能先上傳成功、內容 POST 幾小時後才成功，
@@ -29,7 +47,7 @@ const (
 // 設計成單一 goroutine 的 time.Ticker，不是因為這樣最適合長期擴充（之後案件/使用者
 // 一多，應該換成有鎖、可水平擴展的排程器，例如用 Redis 做分散式鎖或換成獨立的
 // worker 服務），而是在目前單一 VPS、單一後端副本的規模下，這是最簡單可靠的做法。
-func RunNotifyLoop(ctx context.Context, interval time.Duration, cases *repository.CaseRepo, notify *NotifyService) {
+func RunNotifyLoop(ctx context.Context, interval time.Duration, rdb *redis.Client, cases *repository.CaseRepo, notify *NotifyService) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -38,6 +56,9 @@ func RunNotifyLoop(ctx context.Context, interval time.Duration, cases *repositor
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if !acquireLoopLock(ctx, rdb, "notify", interval*2) {
+				continue // 其他副本本輪已認領
+			}
 			runNotifyOnce(ctx, cases, notify)
 		}
 	}
@@ -68,7 +89,7 @@ func runNotifyOnce(ctx context.Context, cases *repository.CaseRepo, notify *Noti
 // 案件封面照或線索照片引用的檔案就刪除。http 上傳與 case/clue POST 之間沒有
 // 所有權綁定，若不清理，匿名使用者可以無限刷滿 NAS 儲存。
 // 每 mediaGCInterval 跑一次，與通知排程共用同一 ctx（SIGTERM 一起停）。
-func RunMediaGCLoop(ctx context.Context, mediaDir string, media *repository.MediaRepo) {
+func RunMediaGCLoop(ctx context.Context, rdb *redis.Client, mediaDir string, media *repository.MediaRepo) {
 	ticker := time.NewTicker(mediaGCInterval)
 	defer ticker.Stop()
 
@@ -77,6 +98,9 @@ func RunMediaGCLoop(ctx context.Context, mediaDir string, media *repository.Medi
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if !acquireLoopLock(ctx, rdb, "media-gc", mediaGCInterval*2) {
+				continue
+			}
 			runMediaGCOnce(ctx, mediaDir, media)
 		}
 	}
@@ -141,7 +165,7 @@ const (
 
 // RunTrackRetentionLoop 定期刪除已完成案件的主要軌跡資料。
 // retentionDays 可由 main.go 依環境變數覆寫（0 = 用預設 14 天）。
-func RunTrackRetentionLoop(ctx context.Context, tracks *repository.TrackRepo, retention time.Duration) {
+func RunTrackRetentionLoop(ctx context.Context, rdb *redis.Client, tracks *repository.TrackRepo, retention time.Duration) {
 	if retention <= 0 {
 		retention = tracksRetentionDefault
 	}
@@ -153,6 +177,9 @@ func RunTrackRetentionLoop(ctx context.Context, tracks *repository.TrackRepo, re
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if !acquireLoopLock(ctx, rdb, "track-retention", tracksRetentionInterval*2) {
+				continue
+			}
 			cutoff := time.Now().Add(-retention)
 			n, err := tracks.DeleteForClosedCases(ctx, cutoff)
 			if err != nil {

@@ -72,16 +72,26 @@ func Build(d Deps) Built {
 	matchRepo := repository.NewMatchRepo(d.Pg)
 	updateRepo := repository.NewUpdateRepo(d.Pg)
 	reportRepo := repository.NewReportRepo(d.Pg)
+	settingsRepo := repository.NewSettingsRepo(d.Pg)
+	sosRepo := repository.NewSosRepo(d.Pg)
+
+	// 動態設定（管理後台改 Resend/webhook）→ 直接發送通道 → 通知服務
+	settingsSvc := service.NewSettingsService(settingsRepo)
+	mailer := service.NewMailer(settingsSvc, d.Cfg.TelegramBotToken)
 
 	authSvc := service.NewAuthService(d.Redis)
+	// Email 登入的驗證碼透過 Resend 寄出（未在管理後台設定 key 時回 ErrNotConfigured）
+	authSvc.EmailSender = mailer.SendOTPEmail
+
 	matchingSvc := service.NewMatchingService(matchRepo)
-	notifySvc := service.NewNotifyService(userRepo, notificationRepo, d.Cfg.NotifyWebhookURL, d.Cfg.BaseURL)
+	notifySvc := service.NewNotifyService(userRepo, notificationRepo, settingsSvc, mailer, d.Cfg.NotifyWebhookURL, d.Cfg.BaseURL)
 
 	photoH := &handler.PhotoHandler{MediaDir: d.Cfg.MediaDir, MaxBytes: d.Cfg.MaxUploadBytes}
 	adminH := &handler.AdminHandler{
 		Users:            userRepo,
 		Cases:            caseRepo,
 		Updates:          updateRepo,
+		Settings:         settingsSvc,
 		AdminTelegramIDs: handler.ParseAdminTelegramIDs(d.Cfg.AdminTelegramIDs),
 	}
 	authH := &handler.AuthHandler{
@@ -98,6 +108,7 @@ func Build(d Deps) Built {
 	matchH := &handler.MatchHandler{Matches: matchRepo, Cases: caseRepo}
 	updateH := &handler.UpdateHandler{Updates: updateRepo, Cases: caseRepo, Users: userRepo}
 	reportH := &handler.ReportHandler{Reports: reportRepo, Users: userRepo}
+	sosH := &handler.SosHandler{Sos: sosRepo, Users: userRepo, Notify: notificationRepo}
 	appConfigH := &handler.AppConfigHandler{TelegramBotUsername: d.Cfg.TelegramBotUsername}
 	shareH := &handler.ShareHandler{Cases: caseRepo, BaseURL: d.Cfg.BaseURL}
 
@@ -118,13 +129,27 @@ func Build(d Deps) Built {
 		// Telegram Login：同樣掛限流，避免有人暴力嘗試偽造簽章
 		v1.POST("/auth/telegram", middleware.RateLimit(d.Redis, "telegram-login", 10, time.Minute), authH.TelegramLogin)
 
+		// Email 登入：與 OTP 同結構（request 寄碼 → verify 換 token）。
+		// 驗證碼由 Resend 寄出（管理後台動態設定），未設定時 request 回 503。
+		emailOtp := v1.Group("/auth/email", middleware.RateLimit(d.Redis, "email-otp", 5, time.Minute))
+		emailOtp.POST("/request", authH.RequestEmailCode)
+		emailOtp.POST("/verify", authH.VerifyEmailCode)
+
+		// 登出：撤銷後端 session（之前只清前端 token，30 天內 token 仍可用）
+		v1.POST("/auth/logout", requireAuth, authH.Logout)
+
+		// SOS 求救：登入使用者（搜索現場狀況）；管理員會收到 system 通知
+		v1.POST("/sos", requireAuth, middleware.RateLimit(d.Redis, "sos-create", 3, time.Minute), sosH.Create)
+
 		// 上傳限流：每 IP 每分鐘 10 次，避免被濫用刷爆 NAS
 		v1.POST("/cases/upload-photo", middleware.RateLimit(d.Redis, "upload", 10, time.Minute), photoH.Upload)
 
 		me := v1.Group("/me", requireAuth)
 		{
 			me.GET("", meH.Get)                                 // 目前使用者基本資料（志願者/管理員狀態）
+			me.GET("/watch-area", meH.GetWatchArea)             // 查看現有關注區域（頁面預填）
 			me.POST("/watch-area", meH.SetWatchArea)            // 設定關注區域，供半徑推播比對
+			me.DELETE("/watch-area", meH.ClearWatchArea)        // 清除關注區域（不再收附近推播）
 			me.POST("/channels", meH.RegisterChannel)           // 註冊通知渠道
 			me.GET("/cases", caseH.ListMine)                    // 我的案件（含已結案的），案主清單入口
 			me.POST("/volunteer-request", meH.RequestVolunteer) // 申請成為認證志願者（管理員審核）
@@ -146,6 +171,11 @@ func Build(d Deps) Built {
 			admin.PATCH("/cases/:id/status", adminH.SetCaseStatus) // 下架/復原/改狀態
 			admin.GET("/users", adminH.ListUsers)                  // 使用者概觀
 			admin.POST("/users/:userId/role", adminH.SetUserRole)  // 升級/撤銷管理員
+			admin.GET("/sos", sosH.AdminListOpen)                  // 未處理的 SOS 清單
+			admin.POST("/sos/:id/resolve", sosH.AdminResolve)      // 標記 SOS 已處理
+			// 營運設定（Resend key/from、通知 webhook）：key 為 write-only
+			admin.GET("/settings", adminH.GetSettings)
+			admin.PUT("/settings", adminH.SetSettings)
 		}
 
 		cases := v1.Group("/cases")
@@ -153,6 +183,7 @@ func Build(d Deps) Built {
 			cases.GET("", caseH.ListNearby)                             // 公開：附近案件（一律模糊座標）
 			cases.POST("", requireAuth, caseH.Create)                   // 發案需登入；會觸發配對比對與通知排程
 			cases.GET("/:id", optionalAuth, caseH.Get)                  // 詳情：依權限決定精確/模糊座標
+			cases.PATCH("/:id", requireAuth, caseH.Update)              // 案主編輯案件內容（title/description/last_seen_at）
 			cases.PATCH("/:id/status", requireAuth, caseH.UpdateStatus) // 結案／標記已團聚，僅限案主
 			// 提交線索免登入，登入可關聯身份。掛限流防匿名灌水
 			cases.POST("/:id/clues", middleware.RateLimit(d.Redis, "clue-create", 10, time.Minute), optionalAuth, clueH.Create)

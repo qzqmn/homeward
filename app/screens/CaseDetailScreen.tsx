@@ -11,6 +11,7 @@ import {
   createReport,
   reviewClue,
   submitClue,
+  updateCase,
   updateCaseStatus,
   updateMatchStatus,
 } from '../lib/api';
@@ -59,6 +60,14 @@ export function CaseDetailScreen({
   const [closing, setClosing] = useState(false);
   /** 正在點開大圖的線索照片（null = 沒有開著） */
   const [viewerPhoto, setViewerPhoto] = useState<string | null>(null);
+
+  // 案主編輯案件內容（title/description;後端 PATCH /cases/:id）。time 同步不開放，
+  // 避免打錯 day/month 的意外（真要改時間不如直接註明在描述裡）。
+  const [editing, setEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState('');
+  const [editDescription, setEditDescription] = useState('');
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState('');
 
   // 登入狀態（含登入完成的即時變化）本頁自己訂閱：案主登入後要立刻重查
   // 精確座標與線索列表，不需要重導路由。
@@ -157,6 +166,28 @@ export function CaseDetailScreen({
     setReportMessage(ok ? '已收到舉報，管理員會盡快處理' : '舉報送出失敗，請稍後再試');
   };
 
+  /** 案主儲存編輯（PATCH /cases/:id）：成功就地更新標題/描述。 */
+  const saveEdits = async () => {
+    if (!editTitle.trim()) {
+      setEditError('標題不能是空的');
+      return;
+    }
+    setSavingEdit(true);
+    const updated = await updateCase(
+      item.id,
+      { title: editTitle.trim(), description: editDescription },
+      { apiBaseUrl, getAuthToken },
+    );
+    setSavingEdit(false);
+    if (!updated) {
+      setEditError('更新失敗，請稍後再試');
+      return;
+    }
+    setItem(updated);
+    setEditing(false);
+    setSubmitMessage('案件內容已更新，修改紀錄留在時間軸裡');
+  };
+
   const share = async () => {
     const url = `${window.location.origin}/c/${item.id}`;
     try {
@@ -209,9 +240,15 @@ export function CaseDetailScreen({
         <MapView centerLng={item.lng} centerLat={item.lat} zoom={13} markers={[{ id: item.id, lng: item.lng, lat: item.lat }]} />
       </View>
 
-      {/* 案主操作：分享 + 狀態變更。狀態清單不再唱獨角戲——案主結案會即時生效。 */}
+      {/* 案主操作：分享 + 編輯 + 狀態變更。狀態清單不再唱獨角戲——案主結案會即時生效。 */}
       <View style={styles.ctaRow}>
         <Button label="分享這個案件" variant="secondary" onPress={share} fullWidth />
+        {item.is_owner ? <Button label="編輯案件內容" variant="ghost"         onPress={() => {
+          setEditTitle(item.title);
+          setEditDescription(item.description);
+          setEditError('');
+          setEditing(true);
+        }} fullWidth /> : null}
         {item.is_owner && item.status === 'open' ? (
           <View style={styles.statusRow}>
             <Button label="已團聚！" onPress={() => void close('found')} loading={closing} fullWidth />
@@ -389,6 +426,35 @@ export function CaseDetailScreen({
               </Pressable>
             ))}
             <Button label="取消" variant="ghost" onPress={() => setReportingCase(false)} />
+          </Pressable>
+        </Pressable>
+      </Modal>
+      {/* 案主編輯案件內容的浮層表單 */}
+      <Modal visible={editing} transparent animationType="fade" onRequestClose={() => setEditing(false)}>
+        <Pressable style={styles.viewerBackdrop} onPress={() => setEditing(false)}>
+          <Pressable style={styles.reportSheet} onPress={() => {}}>
+            <Text style={styles.reportSheetTitle}>編輯案件內容</Text>
+            <Text style={styles.sectionHint}>修改紀錄會留在案件時間軸；位置與照片不在此修改。</Text>
+            <TextInput
+              style={styles.noteInputWrap}
+              value={editTitle}
+              onChangeText={setEditTitle}
+              maxLength={100}
+              placeholder="案件標題"
+              placeholderTextColor={color.inkFaint}
+            />
+            <TextInput
+              style={[styles.noteInputWrap, { minHeight: 120 }]}
+              value={editDescription}
+              onChangeText={setEditDescription}
+              multiline
+              maxLength={2000}
+              placeholder="詳細描述"
+              placeholderTextColor={color.inkFaint}
+            />
+            <Button label="儲存變更" onPress={() => void saveEdits()} loading={savingEdit} fullWidth />
+            {editError ? <Text style={styles.submitMessage}>{editError}</Text> : null}
+            <Button label="取消" variant="ghost" onPress={() => setEditing(false)} fullWidth />
           </Pressable>
         </Pressable>
       </Modal>

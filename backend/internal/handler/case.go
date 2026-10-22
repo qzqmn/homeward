@@ -138,9 +138,7 @@ func (h *CaseHandler) Create(c *gin.Context) {
 
 type updateStatusBody struct {
 	Status string `json:"status" binding:"required"` // open / found / closed
-}
-
-// UpdateStatus 處理 PATCH /api/v1/cases/:id/status：案主結案或標記「已團聚」（status=found）。
+} // UpdateStatus 處理 PATCH /api/v1/cases/:id/status：案主結案或標記「已團聚」（status=found）。
 // 只有案主本人可以操作。
 func (h *CaseHandler) UpdateStatus(c *gin.Context) {
 	id := c.Param("id")
@@ -317,4 +315,67 @@ func caseJSON(cs repository.Case, precise bool, isOwner bool) gin.H {
 
 func validLngLat(lng, lat float64) bool {
 	return lng >= -180 && lng <= 180 && lat >= -90 && lat <= 90
+}
+
+// updateCaseBody 是案主編輯案件內容的請求：全部 pointer、nil = 不改該欄位。
+// 座標/search_radius 不開放編輯（會影響模糊化與配對）；要改位置請重新發案。
+type updateCaseBody struct {
+	Title       *string    `json:"title"`
+	Description *string    `json:"description"`
+	LastSeenAt  *time.Time `json:"last_seen_at"`
+}
+
+// Update 處理 PATCH /api/v1/cases/:id：案主補充/修正文字內容
+// （title/description/last_seen_at）。只有案主本人可以。
+func (h *CaseHandler) Update(c *gin.Context) {
+	id := c.Param("id")
+	if !uuidRe.MatchString(id) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid case id"})
+		return
+	}
+	var body updateCaseBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.Title == nil && body.Description == nil && body.LastSeenAt == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "nothing to update"})
+		return
+	}
+	if body.Title != nil && utf8.RuneCountInString(*body.Title) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "title cannot be empty"})
+		return
+	}
+	if body.Title != nil && utf8.RuneCountInString(*body.Title) > maxTitleLen {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "title too long (max 100 chars)"})
+		return
+	}
+	if body.Description != nil && utf8.RuneCountInString(*body.Description) > maxDescriptionLen {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "description too long (max 2000 chars)"})
+		return
+	}
+
+	userID, _ := middleware.UserID(c)
+	in := repository.UpdateCaseInput{ID: id, OwnerID: userID, Title: body.Title, Description: body.Description, LastSeenAt: body.LastSeenAt}
+	if err := h.Cases.Update(c.Request.Context(), in); errors.Is(err, repository.ErrNotFound) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "only the case owner can update the case"})
+		return
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update case"})
+		return
+	}
+
+	// 編輯內容寫進時間軸，案主與志願者看得到改動紀錄
+	if h.Updates != nil {
+		if err := h.Updates.Add(c.Request.Context(), id, &userID, "note", "案主更新了案件內容"); err != nil {
+			log.Printf("WARN: case_updates add edit event: %v", err)
+		}
+	}
+
+	cs, err := h.Cases.GetByID(c.Request.Context(), id)
+	if err != nil {
+		c.Status(http.StatusNoContent)
+		return
+	}
+	c.JSON(http.StatusOK, caseJSON(cs, true, true))
 }

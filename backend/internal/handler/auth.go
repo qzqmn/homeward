@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -13,6 +14,9 @@ import (
 
 // 只接受 E.164 格式（例如 +85291234567），避免各種本地格式混入資料庫。
 var phoneRe = regexp.MustCompile(`^\+[1-9]\d{7,14}$`)
+
+// Email 登入的收件人格式：一般常見 email（不接受換行/空格），且上限 254 字（RFC）。
+var emailRe = regexp.MustCompile(`^[^@\s]{1,64}@[^@\s.]+\.[^@\s]{2,}$`)
 
 type AuthHandler struct {
 	Auth             *service.AuthService
@@ -192,4 +196,110 @@ func (h *AuthHandler) TelegramLogin(c *gin.Context) {
 			"is_admin":           user.Role == "admin",
 		},
 	})
+}
+
+// ---- Email 登入（Resend 寄驗證碼；管理後台可改設定）----
+
+type requestEmailCodeBody struct {
+	Email string `json:"email" binding:"required"`
+}
+
+// RequestEmailCode 處理 POST /api/v1/auth/email/request：email 格式驗證後，
+// 透過 AuthService.RequestEmailCode（Resend）寄 6 位驗證碼。
+// 未設定 Resend（ErrNotConfigured）回 503，讓前端提示「管理員未配置寄信服務」。
+func (h *AuthHandler) RequestEmailCode(c *gin.Context) {
+	var body requestEmailCodeBody
+	if err := c.ShouldBindJSON(&body); err != nil || !emailRe.MatchString(body.Email) || len(body.Email) > 254 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid email address"})
+		return
+	}
+
+	err := h.Auth.RequestEmailCode(c.Request.Context(), body.Email)
+	switch {
+	case errors.Is(err, service.ErrCooldown):
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "請稍候再重新發送"})
+	case errors.Is(err, service.ErrNotConfigured):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "email login not configured"})
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to send code"})
+	default:
+		c.JSON(http.StatusOK, gin.H{"message": "code sent"})
+	}
+}
+
+type verifyEmailCodeBody struct {
+	Email string `json:"email" binding:"required"`
+	Code  string `json:"code" binding:"required"`
+}
+
+// VerifyEmailCode 處理 POST /api/v1/auth/email/verify：驗證通過建立/取得使用者
+// 並回傳登入 token（與 Telegram 相同的回應形狀；同時自動註冊 email 通知渠道）。
+func (h *AuthHandler) VerifyEmailCode(c *gin.Context) {
+	var body verifyEmailCodeBody
+	if err := c.ShouldBindJSON(&body); err != nil || !emailRe.MatchString(body.Email) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email and code are required"})
+		return
+	}
+
+	if err := h.Auth.VerifyEmailCode(c.Request.Context(), body.Email, body.Code); err != nil {
+		switch {
+		case errors.Is(err, service.ErrOTPInvalid):
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "驗證碼錯誤或已過期"})
+		case errors.Is(err, service.ErrTooManyTries):
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "嘗試次數過多，請重新發送驗證碼"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "verify failed"})
+		}
+		return
+	}
+
+	user, err := h.Users.UpsertByEmail(c.Request.Context(), body.Email)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
+		return
+	}
+	// email 渠道自動註冊：之後 email 通知（案件/線索）直接可用，不用手動填。
+	_ = h.Channels.Register(c.Request.Context(), user.ID, "email", body.Email)
+
+	token, err := h.Auth.IssueSession(c.Request.Context(), user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create session"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"token": token,
+		"user": gin.H{
+			"id":                 user.ID,
+			"display_name":       user.DisplayName,
+			"locale":             user.Locale,
+			"verified_volunteer": user.IsVerifiedVolunteer(),
+			"is_admin":           user.Role == "admin",
+		},
+	})
+}
+
+// Logout 處理 POST /api/v1/auth/logout：撤銷目前 token（後端 session 刪除），
+// 讓「登出」真的下線——之前只清前端 token，30 天內被拆走的 token 依然可用。
+func (h *AuthHandler) Logout(c *gin.Context) {
+	tok := bearerToken(c)
+	if tok == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing bearer token"})
+		return
+	}
+	if err := h.Auth.Logout(c.Request.Context(), tok); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to logout"})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// bearerToken 從 Authorization header 抓 Bearer token（logout 沒有 body 可放）。
+func bearerToken(c *gin.Context) string {
+	const prefix = "Bearer "
+	h := c.GetHeader("Authorization")
+	if strings.HasPrefix(h, prefix) {
+		return strings.TrimPrefix(h, prefix)
+	}
+	return ""
 }

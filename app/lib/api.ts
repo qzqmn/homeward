@@ -6,6 +6,7 @@
 import { enqueue, newClientId } from './offlineQueue';
 import type {
   AdminCaseItem,
+  AdminSettingsView,
   AdminUserItem,
   Case,
   CaseUpdate,
@@ -14,7 +15,9 @@ import type {
   MatchSuggestion,
   MeInfo,
   ReportRecord,
+  SosAdminItem,
   VolunteerRequest,
+  WatchArea,
 } from './types';
 import type { CaseStatus } from '../theme/tokens';
 
@@ -374,10 +377,14 @@ export async function adminUpdateReportStatus(
   }
 }
 
-/** 所有案件概觀（管理後台）。 */
-export async function adminListCases(deps: SubmitDeps): Promise<AdminCaseItem[] | null> {
+/** 所有案件概觀（管理後台）。q=標題搜尋、offset=分頁「載入更多」。 */
+export async function adminListCases(deps: SubmitDeps, opts?: { q?: string; offset?: number }): Promise<AdminCaseItem[] | null> {
   try {
-    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/cases`, { headers: authOnlyHeaders(deps) });
+    const params = new URLSearchParams();
+    if (opts?.q) params.set('q', opts.q);
+    if (opts?.offset) params.set('offset', String(opts.offset));
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/cases${qs}`, { headers: authOnlyHeaders(deps) });
     if (!res.ok) return null;
     const data = (await res.json()) as { cases: AdminCaseItem[] };
     return data.cases;
@@ -400,10 +407,14 @@ export async function adminSetCaseStatus(caseId: string, status: CaseStatus, dep
   }
 }
 
-/** 使用者概觀（管理後台）。 */
-export async function adminListUsers(deps: SubmitDeps): Promise<AdminUserItem[] | null> {
+/** 使用者概觀（管理後台）。q=顯示名稱/聯絡搜尋、offset=分頁「載入更多」。 */
+export async function adminListUsers(deps: SubmitDeps, opts?: { q?: string; offset?: number }): Promise<AdminUserItem[] | null> {
   try {
-    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/users`, { headers: authOnlyHeaders(deps) });
+    const params = new URLSearchParams();
+    if (opts?.q) params.set('q', opts.q);
+    if (opts?.offset) params.set('offset', String(opts.offset));
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/users${qs}`, { headers: authOnlyHeaders(deps) });
     if (!res.ok) return null;
     const data = (await res.json()) as { users: AdminUserItem[] };
     return data.users;
@@ -426,6 +437,67 @@ export async function adminSetUserRole(userId: string, role: 'user' | 'admin', d
   }
 }
 
+/** 未處理的 SOS 求救清單（管理後台）。 */
+export async function adminListSos(deps: SubmitDeps): Promise<SosAdminItem[] | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/sos`, { headers: authOnlyHeaders(deps) });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { sos: SosAdminItem[] };
+    return data.sos;
+  } catch {
+    return null;
+  }
+}
+
+/** 標記某筆 SOS 已處理（管理後台）。 */
+export async function adminResolveSos(sosId: number, deps: SubmitDeps): Promise<boolean> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/sos/${sosId}/resolve`, {
+      method: 'POST',
+      headers: jsonHeaders(deps),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ---- 營運設定（Resend / 通知 webhook；管理後台）----
+
+export async function adminGetSettings(deps: SubmitDeps): Promise<AdminSettingsView | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/settings`, { headers: authOnlyHeaders(deps) });
+    if (!res.ok) return null;
+    return (await res.json()) as AdminSettingsView;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * PUT /admin/settings：nil 欄位代表「不改」。resendApiKey 特別一點：
+ * 空字串 = 保留既有 key；要換 key 才填值。
+ */
+export async function adminSaveSettings(
+  opts: { resendFrom?: string; resendApiKey?: string; notifyWebhook?: string },
+  deps: SubmitDeps,
+): Promise<boolean> {
+  const body: Record<string, string> = {};
+  if (opts.resendFrom !== undefined) body.resend_from = opts.resendFrom;
+  if (opts.resendApiKey !== undefined) body.resend_api_key = opts.resendApiKey;
+  if (opts.notifyWebhook !== undefined) body.notify_webhook_url = opts.notifyWebhook;
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/admin/settings`, {
+      method: 'PUT',
+      headers: jsonHeaders(deps),
+      body: JSON.stringify(body),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 function jsonHeaders(deps: SubmitDeps): HeadersInit {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   const token = deps.getAuthToken();
@@ -436,4 +508,107 @@ function jsonHeaders(deps: SubmitDeps): HeadersInit {
 function authOnlyHeaders(deps: SubmitDeps): HeadersInit {
   const token = deps.getAuthToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// ---- 帳號設定延伸（登出 / 關注區域 / Email OTP / SOS）----
+
+/** 撤銷後端 session（真正下線）；呼叫端不管結果都要清前端 token。 */
+export async function logoutServer(deps: SubmitDeps): Promise<boolean> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/auth/logout`, {
+      method: 'POST',
+      headers: authOnlyHeaders(deps),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** 讀取既有關注區域（頁面預填）；null = 未設定過或載入失敗。 */
+export async function getWatchArea(deps: SubmitDeps): Promise<WatchArea | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/me/watch-area`, {
+      headers: authOnlyHeaders(deps),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { watch_area: WatchArea | null };
+    return data.watch_area;
+  } catch {
+    return null;
+  }
+}
+
+/** 清除關注區域（不再收附近案件推播）；成功回 true。 */
+export async function clearWatchArea(deps: SubmitDeps): Promise<boolean> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/me/watch-area`, {
+      method: 'DELETE',
+      headers: authOnlyHeaders(deps),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Email 登入第一步：寄 6 位驗證碼。done=true 表示已送出（503=後端未配置寄信）。 */
+export async function requestEmailCode(email: string, deps: SubmitDeps): Promise<Response> {
+  return fetch(`${deps.apiBaseUrl}/api/v1/auth/email/request`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  });
+}
+
+/** Email 登入第二步：驗證碼換 token（回應形狀與 Telegram 登入相同）。 */
+export async function verifyEmailCode(email: string, code: string, deps: SubmitDeps): Promise<Response> {
+  return fetch(`${deps.apiBaseUrl}/api/v1/auth/email/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, code }),
+  });
+}
+
+/** SOS 求救（搜索現場需要人手）；成功回事件 id。 */
+export async function submitSos(
+  lng: number,
+  lat: number,
+  note: string,
+  caseId: string | undefined,
+  deps: SubmitDeps,
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/sos`, {
+      method: 'POST',
+      headers: jsonHeaders(deps),
+      body: JSON.stringify({ lng, lat, note, ...(caseId ? { case_id: caseId } : {}) }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ---- 案主編輯案件內容 ----
+
+export interface UpdateCaseInput {
+  title?: string;
+  description?: string;
+  last_seen_at?: string;
+}
+
+/** PATCH /cases/:id：案主編輯文字內容；成功回更新後的 Case（403=非案主）。 */
+export async function updateCase(caseId: string, body: UpdateCaseInput, deps: SubmitDeps): Promise<Case | null> {
+  try {
+    const res = await fetch(`${deps.apiBaseUrl}/api/v1/cases/${caseId}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(deps),
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as Case;
+  } catch {
+    return null;
+  }
 }

@@ -1,0 +1,3 @@
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email ON users (email) WHERE email IS NOT NULL;
+ALTER TABLE users DROP COLUMN IF EXISTS email;
+DROP TABLE IF EXISTS app_settings;

@@ -14,11 +14,24 @@ type User struct {
 	ID                   string
 	PhoneE164            *string // 選填：可以只用 Telegram 登入，不一定有手機號碼
 	TelegramID           *int64  // 選填：可以只用手機 OTP 登入，不一定連過 Telegram
+	Email                *string // 選填：Email 登入（000009 migration 新增）
 	DisplayName          string
 	Locale               string
 	Role                 string     // 'user' | 'admin'（志願者審核後台用 admin）
 	VolunteerVerifiedAt  *time.Time // NULL 表示未認證志願者；非 NULL 才可查看案件精確位置
 	VolunteerRequestedAt *time.Time // 使用者申請成為志願者的時間（管理員審核清單用）
+}
+
+// userCols 是所有 SELECT users 共用的欄位列表（加欄位只改這裡）。
+const userCols = `id::text, phone_e164, telegram_id, email, display_name, locale, role, volunteer_verified_at, volunteer_requested_at`
+
+func scanUser(row pgx.Row) (User, error) {
+	var u User
+	err := row.Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.Email, &u.DisplayName, &u.Locale, &u.Role, &u.VolunteerVerifiedAt, &u.VolunteerRequestedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, ErrNotFound
+	}
+	return u, err
 }
 
 type UserRepo struct{ db *pgxpool.Pool }
@@ -33,11 +46,17 @@ func (r *UserRepo) UpsertByPhone(ctx context.Context, phoneE164 string) (User, e
 	const q = `
 		INSERT INTO users (phone_e164) VALUES ($1)
 		ON CONFLICT (phone_e164) DO UPDATE SET phone_e164 = EXCLUDED.phone_e164
-		RETURNING id::text, phone_e164, telegram_id, display_name, locale, role, volunteer_verified_at, volunteer_requested_at`
-	var u User
-	err := r.db.QueryRow(ctx, q, phoneE164).
-		Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.DisplayName, &u.Locale, &u.Role, &u.VolunteerVerifiedAt, &u.VolunteerRequestedAt)
-	return u, err
+		RETURNING ` + userCols
+	return scanUser(r.db.QueryRow(ctx, q, phoneE164))
+}
+
+// UpsertByEmail 用 email 查找使用者，不存在則建立（Email 登入的對應 upsert）。
+func (r *UserRepo) UpsertByEmail(ctx context.Context, email string) (User, error) {
+	const q = `
+		INSERT INTO users (email, display_name) VALUES ($1, $2)
+		ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
+		RETURNING ` + userCols
+	return scanUser(r.db.QueryRow(ctx, q, email, email))
 }
 
 // UpsertByTelegramID 用 Telegram 使用者 id 查找使用者，不存在則建立並帶入
@@ -46,36 +65,19 @@ func (r *UserRepo) UpsertByTelegramID(ctx context.Context, telegramID int64, dis
 	const q = `
 		INSERT INTO users (telegram_id, display_name) VALUES ($1, $2)
 		ON CONFLICT (telegram_id) DO UPDATE SET telegram_id = EXCLUDED.telegram_id
-		RETURNING id::text, phone_e164, telegram_id, display_name, locale, role, volunteer_verified_at, volunteer_requested_at`
-	var u User
-	err := r.db.QueryRow(ctx, q, telegramID, displayName).
-		Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.DisplayName, &u.Locale, &u.Role, &u.VolunteerVerifiedAt, &u.VolunteerRequestedAt)
-	return u, err
+		RETURNING ` + userCols
+	return scanUser(r.db.QueryRow(ctx, q, telegramID, displayName))
 }
 
 func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
-	const q = `SELECT id::text, phone_e164, telegram_id, display_name, locale, role, volunteer_verified_at, volunteer_requested_at
-	           FROM users WHERE id = $1::uuid AND deleted_at IS NULL`
-	var u User
-	err := r.db.QueryRow(ctx, q, id).
-		Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.DisplayName, &u.Locale, &u.Role, &u.VolunteerVerifiedAt, &u.VolunteerRequestedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return User{}, ErrNotFound
-	}
-	return u, err
+	const q = `SELECT ` + userCols + ` FROM users WHERE id = $1::uuid AND deleted_at IS NULL`
+	return scanUser(r.db.QueryRow(ctx, q, id))
 }
 
 // GetByTelegramID 依 Telegram 帳號 id 查使用者（ADMIN_TELEGRAM_IDS 自動升級時用）。
 func (r *UserRepo) GetByTelegramID(ctx context.Context, telegramID int64) (User, error) {
-	const q = `SELECT id::text, phone_e164, telegram_id, display_name, locale, role, volunteer_verified_at, volunteer_requested_at
-	           FROM users WHERE telegram_id = $1 AND deleted_at IS NULL`
-	var u User
-	err := r.db.QueryRow(ctx, q, telegramID).
-		Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.DisplayName, &u.Locale, &u.Role, &u.VolunteerVerifiedAt, &u.VolunteerRequestedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return User{}, ErrNotFound
-	}
-	return u, err
+	const q = `SELECT ` + userCols + ` FROM users WHERE telegram_id = $1 AND deleted_at IS NULL`
+	return scanUser(r.db.QueryRow(ctx, q, telegramID))
 }
 
 // IsVerifiedVolunteer 用於判斷是否可查看案件的精確座標。
@@ -169,14 +171,22 @@ type AdminUserListRow struct {
 }
 
 // ListUsers 列出所有未刪除帳號，新的排前面，供管理後台檢視/調整角色。
-func (r *UserRepo) ListUsers(ctx context.Context, limit int) ([]AdminUserListRow, error) {
-	const q = `
+// q 非空時依顯示名稱/聯絡模糊過濾（管理後台搜尋框），offset 支援「載入更多」。
+func (r *UserRepo) ListUsers(ctx context.Context, limit, offset int, q string) ([]AdminUserListRow, error) {
+	const qBase = `
 		SELECT id::text, display_name, telegram_id, phone_e164, role, volunteer_verified_at, created_at
 		FROM users
-		WHERE deleted_at IS NULL
+		WHERE deleted_at IS NULL`
+	qFrag := ""
+	args := []any{limit, offset}
+	if q != "" {
+		qFrag = ` AND (display_name ILIKE $3 OR telegram_id::text ILIKE $3 OR phone_e164 ILIKE $3)`
+		args = append(args, "%"+q+"%")
+	}
+	const qOrder = `
 		ORDER BY created_at DESC
-		LIMIT $1`
-	rows, err := r.db.Query(ctx, q, limit)
+		LIMIT $1 OFFSET $2`
+	rows, err := r.db.Query(ctx, qBase+qFrag+qOrder, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -222,6 +232,57 @@ func (r *UserRepo) SetWatchArea(ctx context.Context, userID string, lng, lat flo
 		return ErrNotFound
 	}
 	return nil
+}
+
+// ClearWatchArea 清空關注區域（等同「不想再收到附近案件的推播」）。
+// watch_center / watch_radius_m 兩欄本來就允許 NULL（尚未設定的使用者）。
+func (r *UserRepo) ClearWatchArea(ctx context.Context, userID string) error {
+	const q = `UPDATE users SET watch_center = NULL, watch_radius_m = NULL WHERE id = $1::uuid`
+	tag, err := r.db.Exec(ctx, q, userID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetWatchArea 回傳既有的關注區域；尚未設定過回 ok=false。
+func (r *UserRepo) GetWatchArea(ctx context.Context, userID string) (lng, lat float64, radiusM int, ok bool, err error) {
+	q := `
+		SELECT watch_radius_m,
+		       CASE WHEN watch_center IS NULL THEN NULL
+		            ELSE JSON_BUILD_ARRAY(ST_X(watch_center), ST_Y(watch_center))
+		       END
+		FROM users WHERE id = $1::uuid`
+	var watch []float64
+	err = r.db.QueryRow(ctx, q, userID).Scan(&radiusM, &watch)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	if watch == nil || len(watch) != 2 {
+		return 0, 0, 0, false, nil
+	}
+	return watch[0], watch[1], radiusM, true, nil
+}
+
+// ListAdminUserIDs 回傳所有 role='admin' 的使用者 id（SOS 求助通知用）。
+func (r *UserRepo) ListAdminUserIDs(ctx context.Context) ([]string, error) {
+	rows, err := r.db.Query(ctx, `SELECT id::text FROM users WHERE role = 'admin' AND deleted_at IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 // WatcherInCase：用來排除已經收過同一案件通知的使用者。

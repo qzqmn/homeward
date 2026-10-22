@@ -28,10 +28,11 @@ var (
 
 // AuthService 封裝 OTP 發送/驗證與登入 session（皆存於 Redis，不落地資料庫）。
 //
-// 注意：這裡尚未接上真正的簡訊網關，RequestOTP 只把驗證碼寫進 Redis 並回傳於
-// log（開發用）。上線前必須替換 sendSMS 成實際的簡訊 / WhatsApp OTP 服務。
+// 手機簡訊（sendSMS）目前仍是印 log 的替身實作（尚未申請簡訊網關）；Email 登入
+// 的驗證碼透過 EmailSender 回呼（Resend，router 會接上）真正寄出。
 type AuthService struct {
-	rdb *redis.Client
+	rdb         *redis.Client
+	EmailSender func(ctx context.Context, email, code string) error
 }
 
 func NewAuthService(rdb *redis.Client) *AuthService {
@@ -133,6 +134,70 @@ func (s *AuthService) UserIDForToken(ctx context.Context, token string) (string,
 func sendSMS(phone, code string) error {
 	fmt.Printf("[DEV] send OTP %s to %s (尚未串接簡訊網關，僅供開發除錯)\n", code, phone)
 	return nil
+}
+
+// RequestEmailCode 產生 Email 登入的 6 位驗證碼，與手機 OTP 共用同一組 Redis key
+// 方案（key 前綴以收件人 email 做隔離，不會混淆）。寄信透過 EmailSender
+// （Mailer.SendOTPEmail），未設定 Resend 時回 ErrNotConfigured。
+func (s *AuthService) RequestEmailCode(ctx context.Context, email string) error {
+	if s.EmailSender == nil {
+		return ErrNotConfigured
+	}
+
+	if ok, err := s.rdb.SetNX(ctx, otpCooldownKey(email), "1", otpResendCD).Result(); err != nil {
+		return fmt.Errorf("check cooldown: %w", err)
+	} else if !ok {
+		return ErrCooldown
+	}
+
+	code, err := randomDigits(6)
+	if err != nil {
+		return fmt.Errorf("generate otp: %w", err)
+	}
+
+	pipe := s.rdb.TxPipeline()
+	pipe.Set(ctx, otpKey(email), code, otpTTL)
+	pipe.Del(ctx, otpAttemptsKey(email))
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("store otp: %w", err)
+	}
+
+	if err := s.EmailSender(ctx, email, code); err != nil {
+		return fmt.Errorf("send email otp: %w", err)
+	}
+	return nil
+}
+
+// VerifyEmailCode 核對 Email 驗證碼；成功即碼失效，回傳 nil。
+func (s *AuthService) VerifyEmailCode(ctx context.Context, email, code string) error {
+	attempts, err := s.rdb.Incr(ctx, otpAttemptsKey(email)).Result()
+	if err != nil {
+		return fmt.Errorf("check attempts: %w", err)
+	}
+	s.rdb.Expire(ctx, otpAttemptsKey(email), otpTTL)
+	if attempts > otpMaxAttempts {
+		return ErrTooManyTries
+	}
+
+	stored, err := s.rdb.Get(ctx, otpKey(email)).Result()
+	if errors.Is(err, redis.Nil) {
+		return ErrOTPInvalid
+	}
+	if err != nil {
+		return fmt.Errorf("read otp: %w", err)
+	}
+	if stored != code {
+		return ErrOTPInvalid
+	}
+
+	s.rdb.Del(ctx, otpKey(email), otpAttemptsKey(email))
+	return nil
+}
+
+// Logout 撤銷 session（登出）：刪掉 Redis 裡的 token 對應，讓原 token 立即失效。
+// 之前的登出只清前端 localStorage，token 30 天內仍可用（換裝置/被竊踢不掉）。
+func (s *AuthService) Logout(ctx context.Context, token string) error {
+	return s.rdb.Del(ctx, sessionKey(token)).Err()
 }
 
 func randomDigits(n int) (string, error) {

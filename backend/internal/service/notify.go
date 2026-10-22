@@ -37,19 +37,21 @@ type NearbyCase struct {
 	PhotoPath *string
 }
 
-// NotifyService 負責半徑推播的佇列寫入，以及把到期的通知丟給 webhook 實際發送
-// （見 sendViaChannel）。後端本身不認識 Telegram／簡訊／whatsapp 的 API，只
-// 負責「決定要不要發、發給誰」，實際怎麼送交給 webhookURL 那一端處理。
+// NotifyService 負責半徑推播的佇列寫入，以及把到期的通知實際送出（見 sendViaChannel）。
+// 送達優先順序：Email → Resend 直接寄；Telegram → Bot API 直接寄；有設定
+// webhook（管理後台或 .env）則轉送給自架 Worker；什麼都沒有只印 log（開發）。
 type NotifyService struct {
 	users         *repository.UserRepo
 	notifications *repository.NotificationRepo
-	loc           *time.Location
-	webhookURL    string
-	baseURL       string // 對外網域，組 share_url 塞進 payload 用
+	settings      *SettingsService
+	mailer        *Mailer
+	loc           *time.Location // 靜音時段判斷（香港時間）
+	envWebhookURL string         // .env NOTIFY_WEBHOOK_URL（相容既有部署；管理後台設定優先）
+	baseURL       string         // 對外網域，組 share_url 塞進 payload 用
 	httpClient    *http.Client
 }
 
-func NewNotifyService(users *repository.UserRepo, notifications *repository.NotificationRepo, webhookURL, baseURL string) *NotifyService {
+func NewNotifyService(users *repository.UserRepo, notifications *repository.NotificationRepo, settings *SettingsService, mailer *Mailer, envWebhookURL, baseURL string) *NotifyService {
 	loc, err := time.LoadLocation("Asia/Hong_Kong")
 	if err != nil {
 		loc = time.UTC // 容器內若缺時區資料庫，退回 UTC，避免啟動失敗（僅影響靜音時段判斷）
@@ -57,8 +59,10 @@ func NewNotifyService(users *repository.UserRepo, notifications *repository.Noti
 	return &NotifyService{
 		users:         users,
 		notifications: notifications,
+		settings:      settings,
+		mailer:        mailer,
 		loc:           loc,
-		webhookURL:    webhookURL,
+		envWebhookURL: envWebhookURL,
 		baseURL:       baseURL,
 		httpClient:    &http.Client{Timeout: 10 * time.Second},
 	}
@@ -189,27 +193,49 @@ type webhookEnvelope struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-// sendViaChannel 沒有設定 webhookURL 時只印 log（本機開發／還沒接 webhook 時的
-// 退路）；設定了就 POST 這則通知的內容過去，由 webhook 那端（例如你自己的
-// Cloudflare Worker）決定怎麼送出去。後端完全不需要知道 Telegram bot token
-// 之類的憑證——那些留在 webhook 那端管理，這裡只負責「决定要發什麼」。
+// sendViaChannel 決定這則通知實際怎麼送出：
+//  1. channel=email 且 Resend 已在管理後台設定好 → 直接寄（SendEmail）。
+//  2. channel=telegram 且 .env 有 bot token → 走 Bot API 直接發（不用自架 Worker）。
+//  3. 有 webhook（管理後台的 notify_webhook_url，或 .env 的 NOTIFY_WEBHOOK_URL）
+//     → POST 給自架 Worker，由那端轉發（相容既有部署，也是 whatsapp/web_push 的出路）。
+//  4. 什麼都沒有 → 印 log（本機開發；正式環境不會走到這裡）。
 //
 // 只看 HTTP 狀態碼判斷成功與否：2xx 視為送達，其餘（含逾時、連線失敗）一律
 // 當作失敗，讓這筆通知留在佇列裡等下次重試。
 func (s *NotifyService) sendViaChannel(ctx context.Context, channel, address, kind string, payload []byte) error {
-	if s.webhookURL == "" {
-		// 收件地址屬個資（chat id／電話／email），只印渠道與 kind，
-		// payload 內容也不印（案件標題同屬個資）。
-		fmt.Printf("[DEV] notify via %s kind=%s (payload omitted, NOTIFY_WEBHOOK_URL not set)\n", channel, kind)
-		return nil
+	snap := s.settings.Snapshot(ctx)
+
+	switch {
+	case channel == "email" && snap.ConfiguredResend():
+		subject, text := resolveEmailContent(kind, payload)
+		return s.mailer.SendEmail(ctx, address, subject, text)
+
+	case channel == "telegram" && s.mailer != nil && s.mailer.botToken != "":
+		subject, text := resolveEmailContent(kind, payload)
+		return s.mailer.SendTelegram(ctx, address, subject+"\n"+text)
 	}
 
+	webhook := snap.WebhookURL
+	if webhook == "" {
+		webhook = s.envWebhookURL
+	}
+	if webhook == "" {
+		// 收件地址屬個資（chat id／電話／email），只印渠道與 kind，
+		// payload 內容也不印（案件標題同屬個資）。
+		fmt.Printf("[DEV] notify via %s kind=%s (payload omitted, no resend/webhook configured)\n", channel, kind)
+		return nil
+	}
+	return s.sendWebhook(ctx, webhook, channel, address, kind, payload)
+}
+
+// sendWebhook 保留原本的 webhook 轉發路徑（.env 或管理後台設定的網址）。
+func (s *NotifyService) sendWebhook(ctx context.Context, webhookURL, channel, address, kind string, payload []byte) error {
 	body, err := json.Marshal(webhookEnvelope{Channel: channel, Address: address, Kind: kind, Payload: payload})
 	if err != nil {
 		return fmt.Errorf("marshal webhook payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.webhookURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build webhook request: %w", err)
 	}
@@ -225,6 +251,33 @@ func (s *NotifyService) sendViaChannel(ctx context.Context, channel, address, ki
 		return fmt.Errorf("webhook returned HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// resolveEmailContent 把通知 payload 轉成人手機/信箱可讀的主旨與內文。
+// payload 是 jsonb 欄位原樣內容（case_nearby 帶 case_title/share_url、
+// clue 帶 clue_note 等），badger 欄位缺失也不會 error。
+func resolveEmailContent(kind string, payload []byte) (subject, text string) {
+	var p map[string]any
+	_ = json.Unmarshal(payload, &p)
+	str := func(key string) string {
+		if v, ok := p[key].(string); ok {
+			return v
+		}
+		return ""
+	}
+	switch kind {
+	case "case_nearby":
+		title := str("case_title")
+		subject = "附近有新的協尋案件：" + title
+		text = "在你關注的範圍內，有新的協尋案件「" + title + "」。\n詳情：" + str("share_url")
+	case "clue":
+		subject = "你的案件有新的目擊線索"
+		text = "你的案件收到新的目擊回報：\n" + str("clue_note") + "\n詳情：" + str("share_url")
+	default:
+		subject = "【歸途 Homeward】案件更新通知"
+		text = "你的案件有新進展，請開啟 App 查看：" + str("share_url")
+	}
+	return subject, text
 }
 
 func truncateRunes(s string, max int) string {

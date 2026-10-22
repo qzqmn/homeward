@@ -107,3 +107,28 @@ export interface AdminUserItem {
   name: string | null;
   joined: string;
 }
+
+/** 對應後端 GET /api/v1/me/watch-area 的 watch_area 形狀。 */
+export interface WatchArea {
+  lng: number;
+  lat: number;
+  radius_m: number;
+}
+
+/** 對應後端 GET /api/v1/admin/settings（API key 永不回傳，只有 set 旗標）。 */
+export interface AdminSettingsView {
+  resend_from: string | null;
+  resend_api_key_set: boolean;
+  notify_webhook_url: string | null;
+}
+
+/** 對應後端 GET /api/v1/admin/sos 的一列（尚未處理的求救事件）。 */
+export interface SosAdminItem {
+  id: number;
+  user_id: string;
+  case_id: string | null;
+  lng: number;
+  lat: number;
+  note: string;
+  created_at: string;
+}

@@ -5,8 +5,11 @@ import MapView from '../lib/MapView';
 import { CaseCard } from '../components/CaseCard';
 import { Button } from '../components/Button';
 import {
+  clearWatchArea,
   getMe,
+  getWatchArea,
   listMyCases,
+  logoutServer,
   requestVolunteer,
 } from '../lib/api';
 import { getAuthToken, logout } from '../lib/authStore';
@@ -42,7 +45,7 @@ export function AccountScreen({
   const [requestingVolunteer, setRequestingVolunteer] = useState(false);
   const [volunteerMessage, setVolunteerMessage] = useState('');
 
-  // 關注區域（目前沒有 GET 端點回傳既有設定，預設帶香港中心；儲存後生效）
+  // 關注區域：進畫面先 GET 既有設定預填（null = 還沒設定過）
   const [watch, setWatch] = useState({ lng: HK_CENTER.lng, lat: HK_CENTER.lat, radiusM: 3000 });
   const [savingWatch, setSavingWatch] = useState(false);
   const [watchMessage, setWatchMessage] = useState('');
@@ -86,6 +89,16 @@ export function AccountScreen({
     });
   }, [token, apiBaseUrl]);
 
+  // 既有關注區域載入（登入後才查；GET 失敗就保留香港中心預設值）
+  useEffect(() => {
+    if (!token) return;
+    void getWatchArea({ apiBaseUrl, getAuthToken }).then((area) => {
+      if (area && area.radius_m) {
+        setWatch({ lng: area.lng, lat: area.lat, radiusM: area.radius_m });
+      }
+    });
+  }, [token, apiBaseUrl]);
+
   const applyVolunteer = async () => {
     setRequestingVolunteer(true);
     setVolunteerMessage('');
@@ -120,6 +133,25 @@ export function AccountScreen({
     } finally {
       setSavingWatch(false);
     }
+  };
+
+  const handleLogout = async () => {
+    // 先請後端撤銷 session（真的下線），再清前端 token；後端失敗也照樣登出
+    await logoutServer({ apiBaseUrl, getAuthToken });
+    logout();
+  };
+
+  const removeWatchArea = async () => {
+    setSavingWatch(true);
+    setWatchMessage('');
+    const ok = await clearWatchArea({ apiBaseUrl, getAuthToken });
+    setSavingWatch(false);
+    if (!ok) {
+      setWatchMessage('清除失敗，請稍後再試');
+      return;
+    }
+    setWatch({ lng: HK_CENTER.lng, lat: HK_CENTER.lat, radiusM: 3000 });
+    setWatchMessage('已清除關注區域，不會再收到附近案件的推播');
   };
 
   return (
@@ -202,6 +234,7 @@ export function AccountScreen({
             ))}
           </View>
           <Button label="儲存關注區域" onPress={() => void saveWatchArea()} loading={savingWatch} fullWidth />
+          <Button label="清除關注區域" variant="ghost" onPress={() => void removeWatchArea()} loading={savingWatch} fullWidth />
           {watchMessage ? <Text style={styles.message}>{watchMessage}</Text> : null}
         </View>
       ) : null}
@@ -233,7 +266,7 @@ export function AccountScreen({
         </View>
       ) : null}
 
-      {user ? <Button label="登出" variant="ghost" onPress={logout} /> : null}
+      {user ? <Button label="登出" variant="ghost" onPress={() => void handleLogout()} /> : null}
     </ScrollView>
   );
 }

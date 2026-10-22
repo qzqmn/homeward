@@ -146,16 +146,25 @@ func (r *CaseRepo) ListByOwner(ctx context.Context, ownerID string, limit int) (
 
 // ListAll 列出最近建立的所有案件（不限狀態）——管理後台用的概觀列表，
 // 新建在前。這是審核工具性列表：只回基本欄位，不含座標以外的隱私內容。
-func (r *CaseRepo) ListAll(ctx context.Context, limit int) ([]Case, error) {
-	const q = `
+// q 非空時依標題模糊過濾（管理後台搜尋），offset 支援「載入更多」分頁。
+func (r *CaseRepo) ListAll(ctx context.Context, limit, offset int, q string) ([]Case, error) {
+	const qBase = `
 		SELECT id::text, case_type, status, title, description, last_seen_at,
 		       ST_X(public_center), ST_Y(public_center),
 		       ST_X(public_center), ST_Y(public_center),
 		       search_radius_m, police_report_no, photo_path, owner_id::text, created_at
 		FROM cases
+		WHERE TRUE`
+	qFrag := ""
+	args := []any{limit, offset}
+	if q != "" {
+		qFrag = ` AND title ILIKE $3`
+		args = append(args, "%"+q+"%")
+	}
+	const qOrder = `
 		ORDER BY created_at DESC
-		LIMIT $1`
-	rows, err := r.db.Query(ctx, q, limit)
+		LIMIT $1 OFFSET $2`
+	rows, err := r.db.Query(ctx, qBase+qFrag+qOrder, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +181,53 @@ func (r *CaseRepo) ListAll(ctx context.Context, limit int) ([]Case, error) {
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// UpdateCaseInput 是案主「編輯案件內容」的輸入：nil 欄位代表「沒有要改」。
+// 只開放文字內容與時間（title/description/last_seen_at）；座標修改會牽動
+// public_center 的重新模糊化與配對，目前不開放（重新發案取代）。
+type UpdateCaseInput struct {
+	ID          string
+	OwnerID     string // handler 已驗過案主身份，這裡再帶進 WHERE 二次確認
+	Title       *string
+	Description *string
+	LastSeenAt  *time.Time
+}
+
+// Update 案主編輯案件內容；WHERE 帶 owner_id，touched 0 行 = 非本人或不存在。
+func (r *CaseRepo) Update(ctx context.Context, in UpdateCaseInput) error {
+	const q = `
+		UPDATE cases SET
+		       title       = coalesce($2, title),
+		       description = coalesce($3, description),
+		       last_seen_at = coalesce($4, last_seen_at),
+		       updated_at  = now()
+		WHERE id = $1::uuid AND owner_id = $5::uuid`
+	tag, err := r.db.Exec(ctx, q, in.ID,
+		sqlPtr(in.Title), sqlPtr(in.Description), sqlPtrTime(in.LastSeenAt), in.OwnerID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// sqlPtr/sqlPtrTime 將 Go 指標轉 pgx 可接受的 driver.Value（nil → NULL，交給
+// coalesce 保留原值）。
+func sqlPtr(s *string) any {
+	if s == nil {
+		return nil
+	}
+	return *s
+}
+
+func sqlPtrTime(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return *t
 }
 
 // UpdateStatus 處理結案／標記尋回（PATCH /cases/:id 的底層邏輯）。

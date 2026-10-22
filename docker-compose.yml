@@ -109,6 +109,31 @@ services:
       timeout: 3s
       retries: 10
 
+  # ---------- 資料庫備份（每日 pg_dump 到掛載目錄，保留 BACKUP_KEEP 份）----------
+  # 部署時在 .env 設 BACKUP_DIR=/mnt/nas/homeward-backups（與媒體同一台 NAS）
+  # 啟用；啟用前先 `chown` 給 PGID 的擁有者。還原：
+  #   gunzip -c homeward-XXXX.sql.gz | docker exec -i homeward-postgis psql -U $POSTGRES_USER -d $POSTGRES_DB
+  db-backup:
+    image: imresamu/postgis:16-3.6-bookworm
+    container_name: homeward-db-backup
+    restart: unless-stopped
+    entrypoint: ["sh", "/scripts/backup.sh"]
+    environment:
+      POSTGRES_HOST: postgis-db
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      BACKUP_INTERVAL_SEC: ${BACKUP_INTERVAL_SEC:-86400}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+      BACKUP_DIR: /backups
+    volumes:
+      - ./db/backup.sh:/scripts/backup.sh:ro
+      - ${BACKUP_DIR:-./backups}:/backups
+    depends_on:
+      postgis-db:
+        condition: service_healthy
+    networks: [homeward-net]
+
   # ---------- Nginx：PWA 靜態檔 + 圖片直讀 + API 反代 ----------
   frontend-web:
     image: ghcr.io/${GH_OWNER:?請在 .env 設定 GH_OWNER}/homeward-frontend:${IMAGE_TAG:-latest}

@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { FlatList, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import MapView, { type MapMarker } from '../lib/MapView';
 import { CaseCard } from '../components/CaseCard';
@@ -24,7 +24,26 @@ export function HomeScreen({
   onReport: () => void;
   onAccountPress: () => void;
 }) {
-  const { cases, isSample } = useNearbyCases(apiBaseUrl, HK_CENTER.lng, HK_CENTER.lat);
+  // 以使用者實際位置為查詢中心（允許定位）；拒絕/失敗就用香港中心預設值。
+  // 之前固定香港中心 + 5km，其他地區使用者永遠看不到自己附近的案件。
+  const [center, setCenter] = useState(HK_CENTER);
+  const [located, setLocated] = useState(false);
+
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        // 定位回呼屬資料載入（非同步）而非 render 期間的同步呼叫鏈
+        setCenter({ lng: pos.coords.longitude, lat: pos.coords.latitude });
+        setLocated(true);
+      },
+      // 拒絕授權/逾時就維持預設中心，不打擾使用者
+      () => {},
+      { timeout: 8000, maximumAge: 60000 },
+    );
+  }, []);
+
+  const { cases, isSample } = useNearbyCases(apiBaseUrl, center.lng, center.lat);
   // 桌面/平板（≥760px，與 PhoneFrame 同一個斷點）：地圖與清單並排成兩欄，
   // 清單不再是從螢幕底抽出來的 sheet。
   const { width } = useWindowDimensions();
@@ -47,9 +66,9 @@ export function HomeScreen({
     <View style={[styles.screen, isWide && styles.screenWide]}>
       <View style={[styles.mapWrap, isWide && styles.mapWrapWide]}>
         <MapView
-          centerLng={HK_CENTER.lng}
-          centerLat={HK_CENTER.lat}
-          zoom={11}
+          centerLng={center.lng}
+          centerLat={center.lat}
+          zoom={located ? 12 : 11}
           markers={markers}
           onMarkerPress={(id) => {
             const c = caseById.get(id);
@@ -80,6 +99,7 @@ export function HomeScreen({
         {isWide ? <View style={styles.sheetGap} /> : <View style={styles.sheetHandle} />}
         <View style={styles.sheetHeaderRow}>
           <Text style={styles.sheetTitle}>附近協尋（{cases.length}）</Text>
+          {located ? <Text style={styles.sampleNote}>以你的位置為中心</Text> : null}
           {isSample ? <Text style={styles.sampleNote}>示範資料</Text> : null}
         </View>
         <FlatList
@@ -87,7 +107,7 @@ export function HomeScreen({
           keyExtractor={(c) => c.id}
           contentContainerStyle={styles.listContent}
           renderItem={({ item }) => (
-            <CaseCard item={item} fromLng={HK_CENTER.lng} fromLat={HK_CENTER.lat} onPress={() => onOpenCase(item)} />
+            <CaseCard item={item} fromLng={center.lng} fromLat={center.lat} onPress={() => onOpenCase(item)} />
           )}
           ItemSeparatorComponent={() => <View style={{ height: space.sm }} />}
         />

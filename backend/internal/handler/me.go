@@ -115,3 +115,30 @@ func (h *MeHandler) RequestVolunteer(c *gin.Context) {
 	}
 	c.Status(http.StatusNoContent)
 }
+
+// GetWatchArea 處理 GET /api/v1/me/watch-area：回傳既有的關注區域
+// （頁面打開預填）；尚未設定過回 watch_area=null。
+func (h *MeHandler) GetWatchArea(c *gin.Context) {
+	userID, _ := middleware.UserID(c)
+	lng, lat, radiusM, ok, err := h.Users.GetWatchArea(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load watch area"})
+		return
+	}
+	if !ok {
+		c.JSON(http.StatusOK, gin.H{"watch_area": nil})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"watch_area": gin.H{"lng": lng, "lat": lat, "radius_m": radiusM}})
+}
+
+// ClearWatchArea 處理 DELETE /api/v1/me/watch-area：清空關注區域
+// （使用者不再收到「附近有案件」的推播）。
+func (h *MeHandler) ClearWatchArea(c *gin.Context) {
+	userID, _ := middleware.UserID(c)
+	if err := h.Users.ClearWatchArea(c.Request.Context(), userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear watch area"})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}

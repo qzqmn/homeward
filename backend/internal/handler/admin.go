@@ -13,13 +13,28 @@ import (
 
 	"homeward/internal/middleware"
 	"homeward/internal/repository"
+	"homeward/internal/service"
 )
 
 type AdminHandler struct {
 	Users            *repository.UserRepo
 	Cases            *repository.CaseRepo
 	Updates          *repository.UpdateRepo
-	AdminTelegramIDs []int64 // .env ADMIN_TELEGRAM_IDS：這些 Telegram id 登入時自動升級為 admin
+	Settings         *service.SettingsService // app_settings（Resend/webhook 動態設定）
+	AdminTelegramIDs []int64                  // .env ADMIN_TELEGRAM_IDS：這些 Telegram id 登入時自動升級為 admin
+}
+
+func adminFilterParams(c *gin.Context) (limit, offset int, q string) {
+	limit = 100
+	offset = 0
+	if v, err := strconv.Atoi(c.Query("limit")); err == nil && v > 0 && v <= 200 {
+		limit = v
+	}
+	if v, err := strconv.Atoi(c.Query("offset")); err == nil && v > 0 {
+		offset = v
+	}
+	q = strings.TrimSpace(c.Query("q"))
+	return limit, offset, q
 }
 
 // ListVolunteerRequests 處理 GET /api/v1/admin/volunteer-requests：審核清單
@@ -96,7 +111,8 @@ func (h *AdminHandler) ListCases(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "admin only"})
 		return
 	}
-	cases, err := h.Cases.ListAll(c.Request.Context(), 100)
+	limit, offset, q := adminFilterParams(c)
+	cases, err := h.Cases.ListAll(c.Request.Context(), limit, offset, q)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list cases"})
 		return
@@ -164,7 +180,8 @@ func (h *AdminHandler) ListUsers(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "admin only"})
 		return
 	}
-	users, err := h.Users.ListUsers(c.Request.Context(), 200)
+	limit, offset, q := adminFilterParams(c)
+	users, err := h.Users.ListUsers(c.Request.Context(), limit, offset, q)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list users"})
 		return
@@ -273,4 +290,71 @@ func (h *AdminHandler) MaybeAutoPromoteAdmin(ctx context.Context, telegramID int
 			break
 		}
 	}
+}
+
+// ---- 營運設定（Resend / 通知 webhook；管理後台動態修改）----
+
+// adminSettingsBody 欄位一律 *string：nil = 沒要動、"" = 清空、有值 = 覆寫。
+// resend_api_key 特別一點："" 也保留既有 key（避免誤清），要換 key 就直接填新的。
+type adminSettingsBody struct {
+	ResendAPIKey  *string `json:"resend_api_key"`
+	ResendFrom    *string `json:"resend_from"`
+	NotifyWebhook *string `json:"notify_webhook_url"`
+}
+
+// GetSettings 處理 GET /api/v1/admin/settings：只回 from/webhook 原值與「key
+// 是否已設定」的旗標；API key 本身絕不回傳（避免一次截圖洩漏憑證）。
+func (h *AdminHandler) GetSettings(c *gin.Context) {
+	if !isAdmin(c, h.Users) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin only"})
+		return
+	}
+	snap := h.Settings.Snapshot(c.Request.Context())
+	c.JSON(http.StatusOK, gin.H{
+		"resend_from":        snap.ResendFrom,
+		"resend_api_key_set": snap.ResendAPIKey != "",
+		"notify_webhook_url": snap.WebhookURL,
+	})
+}
+
+// SetSettings 處理 PUT /api/v1/admin/settings：一次可部分更新多個欄位，
+// 存進 DB 後 Invalidate 讓通知發送的 30 秒快照立即重讀，改完不用重啟後端。
+func (h *AdminHandler) SetSettings(c *gin.Context) {
+	if _, ok := adminUserID(c, h.Users); !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin only"})
+		return
+	}
+
+	var body adminSettingsBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ResendFrom != nil && *body.ResendFrom != "" && !emailRe.MatchString(*body.ResendFrom) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid resend_from, expected e.g. alert@your.domain"})
+		return
+	}
+
+	var firstErr error // 一個請求可以同時改多個 key；任一失敗都回 500
+	if body.ResendAPIKey != nil && *body.ResendAPIKey != "" {
+		if err := h.Settings.Set(c.Request.Context(), repository.SettingsKeyResendAPIKey, *body.ResendAPIKey); err != nil {
+			firstErr = err
+		}
+	}
+	if body.ResendFrom != nil && firstErr == nil {
+		if err := h.Settings.Set(c.Request.Context(), repository.SettingsKeyResendFrom, *body.ResendFrom); err != nil {
+			firstErr = err
+		}
+	}
+	if body.NotifyWebhook != nil && firstErr == nil {
+		if err := h.Settings.Set(c.Request.Context(), repository.SettingsKeyNotifyWebhook, *body.NotifyWebhook); err != nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save settings"})
+		return
+	}
+	h.Settings.Invalidate()
+	c.Status(http.StatusNoContent)
 }

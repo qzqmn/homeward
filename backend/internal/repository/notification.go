@@ -47,7 +47,7 @@ func (r *NotificationRepo) EnqueueToUser(ctx context.Context, userID, caseID, ki
 
 	const q = `
 		INSERT INTO notifications (user_id, case_id, channel, kind, payload)
-		SELECT $1::uuid, $2::uuid, c.channel, $3::text, $4::jsonb
+		SELECT $1::uuid, CASE WHEN $2 = '' THEN NULL ELSE $2::uuid END, c.channel, $3::text, $4::jsonb
 		FROM user_channels c WHERE c.user_id = $1::uuid`
 	tag, err := r.db.Exec(ctx, q, userID, caseID, channelKind, payload)
 	if err != nil {

@@ -1,4 +1,4 @@
-# 歸途 Homeward
+﻿# 歸途 Homeward
 
 協同尋人 / 尋寵平台（面向香港）。後端 Go(Gin) + PostgreSQL/PostGIS + Redis，前端 Expo(Web PWA)，全部 Docker 化。
 
@@ -80,8 +80,14 @@ IndexedDB 佇列，不靠 SW。桌面瀏覽器（≥760px）會用置中響應�
 |---|---|---|
 | `GET /config` | 前端啟動時讀取的公開設定（目前只有 Telegram bot username，絕不放密鑰） | 無 |
 | `POST /auth/telegram` | Telegram Login Widget 驗證，回傳登入 token（目前前端用的登入方式） | 無 |
-| `POST /auth/otp/request` | 發送手機 OTP（每 IP 5 次/分鐘；後端已就緒，前端尚未使用） | 無 |
+| `POST /auth/otp/request` | 發送手機 OTP（每 IP 5 次/分鐘； SMS 網關未接，現僅 Email OTP 可用） | 無 |
 | `POST /auth/otp/verify` | 驗證 OTP，回傳登入 token（同上） | 無 |
+| `POST /auth/email/request` | 寄送 Email 驗證碼（Resend；需先在管理後台設定，每 IP 5 次/分鐘） | 無 |
+| `POST /auth/email/verify` | 驗證 Email 驗證碼，自動建立帳號並回傳登入 token | 無 |
+| `POST /auth/logout` | 登出：撤銷目前 token（後端 session 刪除） | 需登入 |
+| `POST /sos` | 發出 SOS 求救（記錄位置/說明，並通知所有管理員；每 IP 3 次/分鐘） | 需登入 |
+| `GET /me/watch-area` | 讀取既有關注區域（預填表單用） | 需登入 |
+| `DELETE /me/watch-area` | 清空關注區域 | 需登入 |
 | `POST /me/watch-area` | 設定「關注區域」（住家/常去地點），供半徑推播比對 | 需登入 |
 | `GET /me` | 目前使用者狀態（是否已認證志願者／申請中／管理員） | 需登入 |
 | `POST /me/channels` | 註冊通知渠道（web_push/telegram/whatsapp/email） | 需登入 |
@@ -90,6 +96,7 @@ IndexedDB 佇列，不靠 SW。桌面瀏覽器（≥760px）會用置中響應�
 | `GET /cases?lat=&lng=&radius_m=` | 附近案件（回傳模糊座標） | 無 |
 | `GET /cases/:id` | 案件詳情（本人或認證志願者可看精確座標） | 選填 |
 | `PATCH /cases/:id/status` | 結案／標記已團聚（`open`/`found`/`closed`） | 僅案主 |
+| `PATCH /cases/:id` | 案主編輯案件標題/說明/最後目擊時間（座標半徑不開放改，記入時間軸） | 僅案主 |
 | `POST /cases/:id/clues` | 提交線索（`client_id` 冪等，支援離線重送；每 IP 10 次/分鐘） | 選填 |
 | `GET /cases/:id/clues` | 案件的目擊線索列表（僅案主本人或認證志願者可看） | 需登入 |
 | `PATCH /cases/:id/clues/:clueId/status` | 案主審核線索（`credible`/`dismissed`/`pending` 撤銷） | 僅案主 |
@@ -104,15 +111,21 @@ IndexedDB 佇列，不靠 SW。桌面瀏覽器（≥760px）會用置中響應�
 | `GET /cases/:id/coverage` | 搜索覆蓋熱圖（軌跡依格網聚合） | 無 |
 | `GET /cases/:id/matches` | 系統建議的撿到/走失配對 | 僅案主 |
 | `PATCH /cases/:id/matches/:matchedId` | 確認／排除一筆配對建議 | 僅案主 |
-| `GET /admin/cases` | 管理後台：所有案件概觀（含已結案） | 僅管理員 |
+| `GET /admin/cases` | 管理後台：所有案件概觀（含已結案；支援 `q` 搜尋與 `limit/offset` 分頁） | 僅管理員 |
 | `PATCH /admin/cases/:id/status` | 管理後台：下架詐騙案／復原誤結案／改狀態 | 僅管理員 |
-| `GET /admin/users` | 管理後台：使用者概觀（角色/志願者狀態） | 僅管理員 |
+| `GET /admin/users` | 管理後台：使用者概觀（支援 `q` 搜尋與分頁） | 僅管理員 |
 | `POST /admin/users/:userId/role` | 管理後台：升級／撤銷管理員 | 僅管理員 |
+| `GET /admin/sos` | 管理後台：仍未處理的 SOS 清單 | 僅管理員 |
+| `POST /admin/sos/:sosId/resolve` | 管理後台：標記 SOS 已處理 | 僅管理員 |
+| `GET /admin/settings` | 管理後台：Resend/webhook 設定（API key 只回已設旗標，永不回原值） | 僅管理員 |
+| `PUT /admin/settings` | 管理後台：更新 Resend key/from、通知轉發 webhook（即時生效，不需重啟） | 僅管理員 |
 | `POST /cases/upload-photo` | 上傳照片（**僅接受 JPEG/PNG**；上傳時重新編碼剝除 EXIF→GPS 座標不會外洩。每 IP 10 次/分鐘。上傳後 72 小時未被任何案件/線索引用的檔案會被背景清理） | 無 |
 | `GET /c/:id`（根路徑，非 `/api/v1`） | 分享預覽頁：給 WhatsApp/Facebook/Telegram 爬蟲讀 OG meta，真人點擊會自動轉去 PWA | 無 |
 
-尚未實作：SOS（`sos_events`）——資料表已在 migration 建好，仍需要對應的 handler／畫面。
-（時間軸、舉報、志願者申請/審核、配對建議畫面均已補上，見下與 API 一覽。）
+尚未實作／刻意不做：真手機 SMS 網關（`/auth/otp/*` 走 log，登入請用 Telegram
+或 Email）；web_push 瀏覽器推播（需 VAPID 金鑰＋訂閱流程，暫由 webhook 轉發）；
+搜索任務清單與斷點續傳；一案多張照片。
+（時間軸、舉報、志願者申請/審核、配對建議、SOS、系統設定畫面均已補上。）
 
 主線「發案 → 路人回報線索 → 案主收通知並看到線索 → 結案」已打通：
 案主會在 `GET /me/cases` 看到自己的案件、詳情頁可看線索列表與結案按鈕、
@@ -209,11 +222,37 @@ Telegram user id>`（逗號可放多個），名單內的帳號一登入就自�
 > 錯誤（無法用在 IP 位址上）。要實際測登入，請等 Cloudflare Tunnel 接好、
 > 用 `https://homeward.688689.xyz` 開啟。
 
-驗證簽章只需要 bot token，後端不會主動呼叫 Telegram API 發任何訊息。
+驗證簽章需要 bot token；同一顆 token 現在也用來直接發送 Telegram 通知訊息
+（使用者要先跟 bot 對話過，Telegram 才准發）。
 
-## 通知 webhook
-通知要怎麼送出去，由你自己的服務決定——後端完全不知道 Telegram bot token
-之類的憑證，只會在 `NOTIFY_WEBHOOK_URL` 設定了的時候，把每則通知 POST 過去：
+## 通知送達（管理後台設定）
+
+通知現在有三條路徑，按優先順序：
+
+1. **Email → Resend 直接寄**：到 [resend.com](https://resend.com) 註冊免費帳號（100 封/天），
+   拿 API key、驗證寄信網域，然後在 **管理後台 → 設定** 分頁填入
+   `resend_from` 與 `resend_api_key`，儲存即生效（不用重啟後端）。同時解鎖 Email 登入（登入頁的
+   「Email 驗證碼」分頁會寄 6 位驗證碼）。
+2. **Telegram → Bot API 直接發**：`.env` 的 `TELEGRAM_BOT_TOKEN` 現在也用來發通知訊息。
+   注意：Telegram 規定使用者必須先跟你的 bot 對話過（按 Start）bot 才能發訊息，提醒志願者先跟 bot 說一聲。
+3. **webhook 轉發**（選填）：在管理後台「設定」→ 通知轉發 webhook 填網址，whatsapp/web_push 或自訂
+   通道靠這條。後端把每則通知 POST 過去：
+
+```json
+{
+  "channel": "telegram",
+  "address": "123456789",
+  "kind": "case_nearby",
+  "payload": {
+    "radius_m": 1500,
+    "case_id": "0b8f...",
+    "case_type": "missing_pet",
+    "case_title": "小白（橘白色唐貓）",
+    "share_url": "https://homeward.688689.xyz/c/0b8f...",
+    "photo_url": "/media/2026/09/xxxx.jpg"
+  }
+}
+```
 ```json
 {
   "channel": "telegram",
@@ -239,12 +278,20 @@ Telegram user id>`（逗號可放多個），名單內的帳號一登入就自�
   Worker 無從得知要通知什麼——現在才算完整**）。
 
 Worker 只要看 HTTP 狀態碼：回 2xx 視為送達成功；其他狀態碼（含逾時、連線
-失敗）後端會標記失敗並留著下次重試。跟你 `tg-ssh-monitor` 那個 Worker是
-同樣的模式，用那份程式碼改一下應該很快。沒設定這個網址時，後端只會把內容
-印到 log，不會報錯，方便本機開發先不接通知也能測。
+失敗）後端會標記失敗並留著下次重試。什麼都沒設定的話，通知內容只會印到
+log（本機開發用）。
 
-想換通知方式（例如哪天想加 WhatsApp），不需要改後端程式碼或重新部署，
-直接改 `.env` 的 `NOTIFY_WEBHOOK_URL`、讓它指去新的 Worker 就好。
+## 資料庫備份
+docker-compose 內建 `db-backup` 服務：在 `.env` 設 `BACKUP_DIR=/mnt/nas/homeward-backups`
+（NAS 上先 `chown` 給 PGID 擁有者）後重新 `deploy.sh`，就會每天 `pg_dump` 壓縮一份到 NAS，
+保留最近 14 份（`BACKUP_KEEP` 可改）。**沒有任何配置時預設備到 compose 目錄下 `./backups/`。**
+
+還原方式：
+```bash
+gunzip -c homeward-20260101-030000.sql.gz | \
+  docker exec -i homeward-postgis psql -U $POSTGRES_USER -d $POSTGRES_DB
+```
+先跑 `docker exec -it homeward-postgis psql -U $POSTGRES_USER -d postgres -c 'DROP DATABASE homeward;'` 再重建空庫後還原較乾淨。
 
 ## Cloudflare Tunnel 設定與排查
 **最常見的錯誤：Public Hostname 的服務網址填 `http://localhost:48180`，但 cloudflared 是跑在
@@ -329,3 +376,5 @@ curl -I http://localhost:8080/media/2026/09/xxxx.jpg   # Nginx 直接從 NAS 讀
 - Postgres / Redis 沒有對外開 port，僅容器網路內可達。
 - `go.sum` 已 commit：backend/Dockerfile 現在用 `go mod download`（依賴版本可重現），
   替換 `go mod tidy` 即時解析的做法。改動依賴時本機執行 `go mod tidy` 更新 go.sum 再 commit。
+
+

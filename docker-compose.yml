@@ -18,6 +18,10 @@ services:
       MEDIA_DIR: /data/media
       BASE_URL: ${BASE_URL:-http://localhost:8080}
       NOTIFY_INTERVAL_SEC: ${NOTIFY_INTERVAL_SEC:-300}
+      # 上傳單檔上限（MB，MAX_UPLOAD_MB），超過會被後端擋掉
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-}
+      # 志願者軌跡保留天數（TRACK_RETENTION_DAYS）：已結案案件結案滿 N 天，背景排程刪除軌跡
+      TRACK_RETENTION_DAYS: ${TRACK_RETENTION_DAYS:-}
       # 只用來驗證 Telegram Login 的簽章，不會拿去發訊息
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       # bot 的 @username（不含 @），公開資訊，前端用它嵌入 Telegram 登入按鈕
@@ -25,6 +29,8 @@ services:
       # 通知要送去哪裡由這個網址決定（例如你的 Cloudflare Worker）；
       # 空字串時後端只會把通知內容印到 log，不會真的發送
       NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
+      # 名單內的 Telegram id 登入時自動升級為管理員（第一次部署不用跑 SQL）
+      ADMIN_TELEGRAM_IDS: ${ADMIN_TELEGRAM_IDS:-}
       POSTGRES_HOST: postgis-db
       POSTGRES_PORT: "5432"
       POSTGRES_USER: ${POSTGRES_USER}

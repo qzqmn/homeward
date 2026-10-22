@@ -52,10 +52,13 @@ func (r *UserRepo) UpsertByPhone(ctx context.Context, phoneE164 string) (User, e
 }
 
 // UpsertByEmail 用 email 查找使用者，不存在則建立（Email 登入的對應 upsert）。
+// 注意：uq_users_email 是部分唯一索引（WHERE email IS NOT NULL），ON CONFLICT
+// 的推斷條件必須帶上同樣的 WHERE，否則 Postgres 找不到匹配約束會直接報錯。
 func (r *UserRepo) UpsertByEmail(ctx context.Context, email string) (User, error) {
 	const q = `
 		INSERT INTO users (email, display_name) VALUES ($1, $2)
-		ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
+		ON CONFLICT (email) WHERE email IS NOT NULL
+		DO UPDATE SET email = EXCLUDED.email
 		RETURNING ` + userCols
 	return scanUser(r.db.QueryRow(ctx, q, email, email))
 }

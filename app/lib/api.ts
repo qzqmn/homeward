@@ -570,6 +570,53 @@ export async function verifyEmailCode(email: string, code: string, deps: SubmitD
   });
 }
 
+// ---- 用戶名 + 密碼登入 ----
+
+/** 密碼登入：account 可以是用戶名或 email；成功回 token+user（與其他登入同形狀）。 */
+export async function passwordLogin(account: string, password: string, deps: SubmitDeps): Promise<Response> {
+  return fetch(`${deps.apiBaseUrl}/api/v1/auth/password/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ account, password }),
+  });
+}
+
+/** 忘記密碼第一步：對帳號的 email 寄重置驗證碼（帳號不存在也回 200，不洩露存在性）。 */
+export async function forgotPassword(account: string, deps: SubmitDeps): Promise<Response> {
+  return fetch(`${deps.apiBaseUrl}/api/v1/auth/password/forgot`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ account }),
+  });
+}
+
+/** 忘記密碼第二步：驗證碼 + 新密碼；成功回 token+user（直接登入）。 */
+export async function resetPassword(account: string, code: string, newPassword: string, deps: SubmitDeps): Promise<Response> {
+  return fetch(`${deps.apiBaseUrl}/api/v1/auth/password/reset`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ account, code, new_password: newPassword }),
+  });
+}
+
+/** 設定/更改帳號密碼（username 留空只改密碼；已有密碼需帶 currentPassword）。 */
+export async function setCredential(
+  username: string,
+  password: string,
+  currentPassword: string,
+  deps: SubmitDeps,
+): Promise<Response> {
+  return fetch(`${deps.apiBaseUrl}/api/v1/me/credential`, {
+    method: 'POST',
+    headers: jsonHeaders(deps),
+    body: JSON.stringify({
+      ...(username ? { username } : {}),
+      password,
+      ...(currentPassword ? { current_password: currentPassword } : {}),
+    }),
+  });
+}
+
 /** SOS 求救（搜索現場需要人手）；成功回事件 id。 */
 export async function submitSos(
   lng: number,

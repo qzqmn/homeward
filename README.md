@@ -15,7 +15,9 @@ homeward/
 │   └── migrations/              # 000001 初始表 / 000002 geography 索引 / 000003 users 與擴充 /
 │   │                             # 000004 流程表 / 000005 封面照＋關注區域＋通知去重
 │   │                             # 000007 通知多渠道唯一索引修正（每渠道一筆）＋FK 索引
-│   │                             # 000008 志願者申請欄位（volunteer_requested_at）
+│   │                             # 000008 志願者申請欄位（volunteer_requested_at）/
+│   │                             # 000009 users.email＋app_settings（Resend 等）/ 000010 email 納入身份約束 /
+│   │                             # 000011 username/password_hash（帳號密碼登入）
 ├── backend/                     # Go API
 │   ├── Dockerfile
 │   ├── cmd/server/main.go
@@ -83,7 +85,10 @@ IndexedDB 佇列，不靠 SW。桌面瀏覽器（≥760px）會用置中響應�
 | `POST /auth/otp/request` | 發送手機 OTP（每 IP 5 次/分鐘； SMS 網關未接，現僅 Email OTP 可用） | 無 |
 | `POST /auth/otp/verify` | 驗證 OTP，回傳登入 token（同上） | 無 |
 | `POST /auth/email/request` | 寄送 Email 驗證碼（Resend；需先在管理後台設定，每 IP 5 次/分鐘） | 無 |
-| `POST /auth/email/verify` | 驗證 Email 驗證碼，自動建立帳號並回傳登入 token | 無 |
+| `POST /auth/email/verify` | 驗證 Email 驗證碼，自動建立帳號並回傳登入 token；未設用戶名/密碼時回傳欄位讓前端引導補設 | 無 |
+| `POST /auth/password/login` | 用戶名/Email + 密碼登入（bcrypt；每 IP 5 次/分鐘防暴力猜） | 無 |
+| `POST /auth/password/forgot` | 忘記密碼：對帳號的 email 寄重置碼（存在性不回應，無帳號也回 200） | 無 |
+| `POST /auth/password/reset` | 重置碼 + 新密碼 → 直接設新密碼並回傳登入 token | 無 |
 | `POST /auth/logout` | 登出：撤銷目前 token（後端 session 刪除） | 需登入 |
 | `POST /sos` | 發出 SOS 求救（記錄位置/說明，並通知所有管理員；每 IP 3 次/分鐘） | 需登入 |
 | `GET /me/watch-area` | 讀取既有關注區域（預填表單用） | 需登入 |
@@ -91,6 +96,7 @@ IndexedDB 佇列，不靠 SW。桌面瀏覽器（≥760px）會用置中響應�
 | `POST /me/watch-area` | 設定「關注區域」（住家/常去地點），供半徑推播比對 | 需登入 |
 | `GET /me` | 目前使用者狀態（是否已認證志願者／申請中／管理員） | 需登入 |
 | `POST /me/channels` | 註冊通知渠道（web_push/telegram/whatsapp/email） | 需登入 |
+| `POST /me/credential` | 設定用戶名 + 密碼（用戶名一次性、改密需帶 current_password；密碼登入的帳號管理入口） | 需登入 |
 | `POST /me/volunteer-request` | 申請成為認證志願者（冪等；管理員審核後開放權限） | 需登入 |
 | `POST /cases` | 建立案件（附 `photo_path` 作封面照；會觸發配對比對與通知排程） | 需登入 |
 | `GET /cases?lat=&lng=&radius_m=` | 附近案件（回傳模糊座標） | 無 |
@@ -201,9 +207,11 @@ Telegram user id>`（逗號可放多個），名單內的帳號一登入就自�
 「通知 webhook」一節）。
 
 ## Telegram 登入設定
-目前登入方式是 Telegram Login Widget（官方功能），不是簡訊 OTP——免費、不用
-註冊第三方商業帳號、比打驗證碼更順手。手機 OTP 的後端 API 還在（見下面 API
+登入方式有三種：**Telegram Login Widget**（免費、不用
+註冊第三方商業帳號、比打驗證碼更順手）、**用戶名 + 密碼**（註冊一次後日常
+登入）與 **Email 驗證碼**（註冊與備援）。手機 OTP 的後端 API 還在（見上面 API
 一覽），只是沒有接真正的簡訊網關，前端也還沒放對應畫面。
+
 
 1. Telegram 搜尋 **@BotFather**，傳 `/newbot`，依指示取名字、取 username
    （一定要以 `bot` 結尾，例如 `HomewardHKBot`），拿到一組 bot token。
@@ -224,6 +232,15 @@ Telegram user id>`（逗號可放多個），名單內的帳號一登入就自�
 
 驗證簽章需要 bot token；同一顆 token 現在也用來直接發送 Telegram 通知訊息
 （使用者要先跟 bot 對話過，Telegram 才准發）。
+
+### 帳號密碼登入
+註冊流程：登入頁「Email 驗證碼」分頁 → 收碼核對 → **立刻補設用戶名與密碼**
+→ 完成。之後日常登入就用「密碼」分頁（用戶名或 email + 密碼），驗證碼只在
+註冊和忘記密碼時出現。
+
+- 密碼存 bcrypt hash；3–20 字元用戶名（不分大小寫唯一）；密碼至少 8 字且須同時含字母與數字
+- 忘記密碼：「密碼」分頁 → 忘記密碼 → 帳號收到重置碼 → 設新密碼直接登入
+- 用戶名設定後不可改（避免歷史線索對不上人）；「我的帳號」頁可隨時改密碼
 
 ## 通知送達（管理後台設定）
 
@@ -385,5 +402,6 @@ curl -I http://localhost:8080/media/2026/09/xxxx.jpg   # Nginx 直接從 NAS 讀
 - Postgres / Redis 沒有對外開 port，僅容器網路內可達。
 - `go.sum` 已 commit：backend/Dockerfile 現在用 `go mod download`（依賴版本可重現），
   替換 `go mod tidy` 即時解析的做法。改動依賴時本機執行 `go mod tidy` 更新 go.sum 再 commit。
+
 
 

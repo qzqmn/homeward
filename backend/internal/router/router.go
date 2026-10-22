@@ -98,6 +98,7 @@ func Build(d Deps) Built {
 		Auth:             authSvc,
 		Users:            userRepo,
 		Channels:         channelRepo,
+		Mailer:           mailer, // 忘記密碼的重置碼也走 Resend
 		TelegramBotToken: d.Cfg.TelegramBotToken,
 		Admin:            adminH, // ADMIN_TELEGRAM_IDS 登入時自動升級
 	}
@@ -135,6 +136,13 @@ func Build(d Deps) Built {
 		emailOtp.POST("/request", authH.RequestEmailCode)
 		emailOtp.POST("/verify", authH.VerifyEmailCode)
 
+		// 用戶名/Email + 密碼：註冊仍走上面的驗證碼，之後日常登入用密碼（快、離線-friendly）。
+		// 登入/忘記密碼都掛限流：暴力猜密碼的成本主要靠此處緩住。
+		pwd := v1.Group("/auth/password", middleware.RateLimit(d.Redis, "pwd-login", 5, time.Minute))
+		pwd.POST("/login", authH.PasswordLogin)
+		pwd.POST("/forgot", authH.PasswordForgot)
+		pwd.POST("/reset", authH.PasswordReset)
+
 		// 登出：撤銷後端 session（之前只清前端 token，30 天內 token 仍可用）
 		v1.POST("/auth/logout", requireAuth, authH.Logout)
 
@@ -151,6 +159,7 @@ func Build(d Deps) Built {
 			me.POST("/watch-area", meH.SetWatchArea)            // 設定關注區域，供半徑推播比對
 			me.DELETE("/watch-area", meH.ClearWatchArea)        // 清除關注區域（不再收附近推播）
 			me.POST("/channels", meH.RegisterChannel)           // 註冊通知渠道
+			me.POST("/credential", meH.SetCredential)           // 設定/更改 用戶名與密碼
 			me.GET("/cases", caseH.ListMine)                    // 我的案件（含已結案的），案主清單入口
 			me.POST("/volunteer-request", meH.RequestVolunteer) // 申請成為認證志願者（管理員審核）
 		}

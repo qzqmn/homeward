@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import MapView from '../lib/MapView';
 import { CaseCard } from '../components/CaseCard';
@@ -11,6 +11,7 @@ import {
   listMyCases,
   logoutServer,
   requestVolunteer,
+  setCredential,
 } from '../lib/api';
 import { getAuthToken, logout } from '../lib/authStore';
 import { useAuth } from '../lib/useAuth';
@@ -50,6 +51,13 @@ export function AccountScreen({
   const [savingWatch, setSavingWatch] = useState(false);
   const [watchMessage, setWatchMessage] = useState('');
 
+  // 帳號憑證（用戶名/密碼）：顯示現況 + 設定/更改密碼表單
+  const [credUsername, setCredUsername] = useState('');
+  const [credPassword, setCredPassword] = useState('');
+  const [credCurrent, setCredCurrent] = useState('');
+  const [credBusy, setCredBusy] = useState(false);
+  const [credMessage, setCredMessage] = useState('');
+
   const deps = { apiBaseUrl, getAuthToken };
 
   // 我的案件：登入狀態改變（登入完成回來）也會重新載。
@@ -86,6 +94,7 @@ export function AccountScreen({
     }
     void getMe({ apiBaseUrl, getAuthToken }).then((info) => {
       setMe(info);
+      if (info?.username) setCredUsername(info.username);
     });
   }, [token, apiBaseUrl]);
 
@@ -132,6 +141,32 @@ export function AccountScreen({
       setWatchMessage('目前連不上伺服器，請確認網路連線');
     } finally {
       setSavingWatch(false);
+    }
+  };
+
+  const saveCredential = async () => {
+    if (!me?.has_password && credPassword.length < 8) {
+      setCredMessage('密碼至少 8 個字，且需含字母與數字');
+      return;
+    }
+    setCredBusy(true);
+    setCredMessage('');
+    try {
+      const res = await setCredential(credUsername.trim(), credPassword, credCurrent, { apiBaseUrl, getAuthToken });
+      if (res.ok) {
+        setCredCurrent('');
+        setCredPassword('');
+        setCredMessage('已更新！之後可用「用戶名 + 密碼」登入');
+        const info = await getMe({ apiBaseUrl, getAuthToken });
+        if (info) setMe(info);
+      } else {
+        const err = (await res.json().catch(() => ({}))) as { error?: string };
+        setCredMessage(err.error ?? '設定失敗，請稍後再試');
+      }
+    } catch {
+      setCredMessage('目前連不上伺服器，請確認網路連線');
+    } finally {
+      setCredBusy(false);
     }
   };
 
@@ -239,6 +274,61 @@ export function AccountScreen({
         </View>
       ) : null}
 
+      {/* ---- 帳號憑證：用戶名/密碼（登入頁的「密碼」分頁用） ---- */}
+      {user ? (
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>帳號與密碼</Text>
+          <Text style={styles.hint}>
+            {me?.username ? `用戶名：${me.username}` : '尚未設定用戶名'}
+            {me?.email ? `　Email：${me.email}` : ''}
+          </Text>
+          {me?.username ? null : (
+            <>
+              <Text style={styles.fieldLabel}>用戶名（3–20 個英文字母、數字或底線，設定後不能改）</Text>
+              <TextInput
+                style={styles.credInput}
+                value={credUsername}
+                onChangeText={setCredUsername}
+                placeholder="用戶名"
+                placeholderTextColor={color.inkFaint}
+                autoCapitalize="none"
+              />
+            </>
+          )}
+          {me?.has_password ? (
+            <>
+              <Text style={styles.fieldLabel}>目前密碼</Text>
+              <TextInput
+                style={styles.credInput}
+                value={credCurrent}
+                onChangeText={setCredCurrent}
+                placeholder="目前密碼"
+                placeholderTextColor={color.inkFaint}
+                secureTextEntry
+                autoCapitalize="none"
+              />
+            </>
+          ) : null}
+          <Text style={styles.fieldLabel}>{me?.has_password ? '新密碼（至少 8 字，含字母與數字）' : '設定密碼（至少 8 字，含字母與數字）'}</Text>
+          <TextInput
+            style={styles.credInput}
+            value={credPassword}
+            onChangeText={setCredPassword}
+            placeholder="密碼"
+            placeholderTextColor={color.inkFaint}
+            secureTextEntry
+            autoCapitalize="none"
+          />
+          <Button
+            label={me?.has_password ? '更改密碼' : '設定用戶名與密碼'}
+            onPress={() => void saveCredential()}
+            loading={credBusy}
+            fullWidth
+          />
+          {credMessage ? <Text style={styles.message}>{credMessage}</Text> : null}
+        </View>
+      ) : null}
+
       {/* ---- 志願者申請：搜索/看精確位置/線索列表都需要認證 ---- */}
       {user && me && !me.verified_volunteer ? (
         <View style={styles.section}>
@@ -296,4 +386,15 @@ const styles = StyleSheet.create({
   radiusChipText: { ...t.bodyMedium, color: color.inkSoft },
   radiusChipTextActive: { color: color.white },
   message: { ...t.bodyMedium, color: color.hope, textAlign: 'center' },
+  fieldLabel: { ...t.bodyMedium, color: color.ink },
+  credInput: {
+    borderWidth: 1.5,
+    borderColor: color.border,
+    borderRadius: radius.md,
+    backgroundColor: color.surface,
+    paddingHorizontal: space.md,
+    paddingVertical: space.sm + 2,
+    ...t.body,
+    color: color.ink,
+  },
 });

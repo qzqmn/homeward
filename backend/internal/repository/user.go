@@ -16,6 +16,9 @@ type User struct {
 	PhoneE164            *string // 選填：可以只用 Telegram 登入，不一定有手機號碼
 	TelegramID           *int64  // 選填：可以只用手機 OTP 登入，不一定連過 Telegram
 	Email                *string // 選填：Email 登入（000009 migration 新增）
+	Username             *string // 選填：密碼登入的用戶名（000011 migration 新增）
+	PasswordHash         string  // bcrypt hash；空字串表示尚未設密碼（只能驗證碼/Telegram 登入）
+	PasswordSetAt        *time.Time
 	DisplayName          string
 	Locale               string
 	Role                 string     // 'user' | 'admin'（志願者審核後台用 admin）
@@ -24,11 +27,11 @@ type User struct {
 }
 
 // userCols 是所有 SELECT users 共用的欄位列表（加欄位只改這裡）。
-const userCols = `id::text, phone_e164, telegram_id, email, display_name, locale, role, volunteer_verified_at, volunteer_requested_at`
+const userCols = `id::text, phone_e164, telegram_id, email, username, coalesce(password_hash, ''), password_set_at, display_name, locale, role, volunteer_verified_at, volunteer_requested_at`
 
 func scanUser(row pgx.Row) (User, error) {
 	var u User
-	err := row.Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.Email, &u.DisplayName, &u.Locale, &u.Role, &u.VolunteerVerifiedAt, &u.VolunteerRequestedAt)
+	err := row.Scan(&u.ID, &u.PhoneE164, &u.TelegramID, &u.Email, &u.Username, &u.PasswordHash, &u.PasswordSetAt, &u.DisplayName, &u.Locale, &u.Role, &u.VolunteerVerifiedAt, &u.VolunteerRequestedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
@@ -76,6 +79,31 @@ func (r *UserRepo) UpsertByTelegramID(ctx context.Context, telegramID int64, dis
 func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
 	const q = `SELECT ` + userCols + ` FROM users WHERE id = $1::uuid AND deleted_at IS NULL`
 	return scanUser(r.db.QueryRow(ctx, q, id))
+}
+
+// GetByEmail 依 email 查使用者（密碼登入/忘記密碼解析帳號用）。
+func (r *UserRepo) GetByEmail(ctx context.Context, email string) (User, error) {
+	const q = `SELECT ` + userCols + ` FROM users WHERE email = $1 AND deleted_at IS NULL`
+	return scanUser(r.db.QueryRow(ctx, q, email))
+}
+
+// GetByUsername 依用戶名查使用者（不分大小寫，見 uq_users_username_lower）。
+func (r *UserRepo) GetByUsername(ctx context.Context, username string) (User, error) {
+	const q = `SELECT ` + userCols + ` FROM users WHERE lower(username) = lower($1) AND deleted_at IS NULL`
+	return scanUser(r.db.QueryRow(ctx, q, username))
+}
+
+// SetCredential 寫入用戶名/密碼（密碼登入的註冊與改密共用）。username 傳 nil
+// 表示只改密碼不做用戶名；唯一的 username已在 service 層預先檢查可用性。
+func (r *UserRepo) SetCredential(ctx context.Context, userID string, username *string, passwordHash string) (User, error) {
+	const q = `
+		UPDATE users
+		SET username = coalesce($2, username),
+		    password_hash = $3,
+		    password_set_at = now()
+		WHERE id = $1::uuid AND deleted_at IS NULL
+		RETURNING ` + userCols
+	return scanUser(r.db.QueryRow(ctx, q, userID, username, passwordHash))
 }
 
 // GetByTelegramID 依 Telegram 帳號 id 查使用者（ADMIN_TELEGRAM_IDS 自動升級時用）。

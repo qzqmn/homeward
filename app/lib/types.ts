@@ -87,6 +87,10 @@ export interface MeInfo {
   verified_volunteer: boolean;
   volunteer_requested: boolean;
   is_admin: boolean;
+  /** 帳號憑證概況：密碼登入設定狀態（未設 = 只能用驗證碼/Telegram 登入）。 */
+  username: string | null;
+  email: string | null;
+  has_password: boolean;
 }
 
 /** 對應後端 GET /api/v1/admin/cases 的一列（所有案件概觀）。 */

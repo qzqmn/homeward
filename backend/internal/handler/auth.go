@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -23,7 +24,8 @@ type AuthHandler struct {
 	Auth             *service.AuthService
 	Users            *repository.UserRepo
 	Channels         *repository.ChannelRepo
-	TelegramBotToken string // 空字串表示沒設定，Telegram 登入會回 503
+	Mailer           *service.Mailer // 忘記密碼的驗證碼一樣走 Resend
+	TelegramBotToken string          // 空字串表示沒設定，Telegram 登入會回 503
 	// Admin 非空時：telegram_id 在 ADMIN_TELEGRAM_IDS 名單內的帳號登入時自動升級
 	// 為 admin（第一個管理員的初始化通道，不必進 VPS 跑 SQL）。
 	Admin *AdminHandler
@@ -274,14 +276,27 @@ func (h *AuthHandler) VerifyEmailCode(c *gin.Context) {
 		return
 	}
 
+	loginResponse(c, user, token)
+}
+
+// loginResponse 是各登入端點共通的成功回應：token + 使用者狀態（含帳號憑證
+// 概況——前端據 has_password/username 決定要不要先引導「設用戶名密碼」）。
+func loginResponse(c *gin.Context, u repository.User, token string) {
+	var username *string
+	if u.Username != nil {
+		name := *u.Username
+		username = &name
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"token": token,
 		"user": gin.H{
-			"id":                 user.ID,
-			"display_name":       user.DisplayName,
-			"locale":             user.Locale,
-			"verified_volunteer": user.IsVerifiedVolunteer(),
-			"is_admin":           user.Role == "admin",
+			"id":                 u.ID,
+			"display_name":       u.DisplayName,
+			"username":           username,
+			"has_password":       u.PasswordHash != "",
+			"locale":             u.Locale,
+			"verified_volunteer": u.IsVerifiedVolunteer(),
+			"is_admin":           u.Role == "admin",
 		},
 	})
 }
@@ -319,4 +334,164 @@ func maskEmail(email string) string {
 		return "***" + email[at:]
 	}
 	return email[:1] + "***" + email[at:]
+}
+
+// =====================  用戶名 + 密碼登入  =====================
+// 註冊（Email 驗證碼）照舊；之後登入用 用戶名或 email + 密碼。忘記密碼走
+// 已驗證的 email 寄重置驗證碼（同 OTP 流程），不需要另外的「忘記密碼」表。
+
+type passwordBody struct {
+	Account         string `json:"account" binding:"required"`
+	Password        string `json:"password" binding:"required"`
+	Code            string `json:"code"`             // 僅 reset 用
+	NewPassword     string `json:"new_password"`     // 像 reset 用
+	Username        string `json:"username"`         // 註冊後設用戶名；留空只改密碼
+	CurrentPassword string `json:"current_password"` // 已有密碼時改密忘記碼重置不必填
+}
+
+// resolveAccount 由「用戶名或 email」找到使用者；找不到回 ErrNotFound（query 錯誤路徑不改寫，呼叫端統一 401/200 處理以避免帳號枚舉）。
+func (h *AuthHandler) resolveAccount(ctx context.Context, account string) (repository.User, error) {
+	if emailRe.MatchString(account) {
+		return h.Users.GetByEmail(ctx, strings.ToLower(account))
+	}
+	return h.Users.GetByUsername(ctx, account)
+}
+
+// PasswordLogin 處理 POST /api/v1/auth/password/login：帳號（用戶名或email）
+// + 密碼 → session token。統一 401 訊息避免洩露帳號是否存在。
+func (h *AuthHandler) PasswordLogin(c *gin.Context) {
+	var b passwordBody
+	if err := c.ShouldBindJSON(&b); err != nil || b.Account == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "account and password are required"})
+		return
+	}
+	if len(b.Password) > 72 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "帳號或密碼不正確"})
+		return
+	}
+	u, err := h.resolveAccount(c.Request.Context(), strings.TrimSpace(b.Account))
+	if errors.Is(err, repository.ErrNotFound) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "帳號或密碼不正確"})
+		return
+	}
+	if err != nil {
+		log.Printf("WARN: password login lookup %q: %v", maskAccount(b.Account), err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "login failed"})
+		return
+	}
+	if u.PasswordHash == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "該帳號尚未設定密碼，請改用驗證碼或 Telegram 登入"})
+		return
+	}
+	if err := service.CheckPassword(u.PasswordHash, b.Password); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "帳號或密碼不正確"})
+		return
+	}
+	token, err := h.Auth.IssueSession(c.Request.Context(), u.ID)
+	if err != nil {
+		log.Printf("WARN: issue session for user %s: %v", u.ID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create session"})
+		return
+	}
+	loginResponse(c, u, token)
+}
+
+// PasswordForgot 處理 POST /api/v1/auth/password/forgot：對帳號的 email 寄
+// 重置驗證碼。無論帳號是否存在都回同一句，避免枚舉。
+func (h *AuthHandler) PasswordForgot(c *gin.Context) {
+	var b passwordBody
+	if err := c.ShouldBindJSON(&b); err != nil || b.Account == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "account is required"})
+		return
+	}
+	msg := "如果這個帳號的 email 有效，重置碼已寄出（留意垃圾郵件匣）"
+	u, err := h.resolveAccount(c.Request.Context(), strings.TrimSpace(b.Account))
+	if err != nil || u.Email == nil {
+		c.JSON(http.StatusOK, gin.H{"message": msg})
+		return
+	}
+	// 共用 OTP 寄送（cooldown 60 秒也跟著走）
+	err = h.Auth.RequestEmailCode(c.Request.Context(), *u.Email)
+	switch {
+	case err == nil:
+	case errors.Is(err, service.ErrCooldown):
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "請稍候再重新發送"})
+		return
+	case errors.Is(err, service.ErrNotConfigured):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "email login not configured"})
+		return
+	default:
+		log.Printf("WARN: send reset code to %s: %v", maskEmail(*u.Email), err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to send code"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": msg})
+}
+
+// PasswordReset 處理 POST /api/v1/auth/password/reset：驗證碼核對通過即
+// 直接設新密碼並登入（省一次輸入）。
+func (h *AuthHandler) PasswordReset(c *gin.Context) {
+	var b passwordBody
+	if err := c.ShouldBindJSON(&b); err != nil || b.Account == "" || b.Code == "" || b.NewPassword == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "account, code and new_password are required"})
+		return
+	}
+	if err := service.ValidPassword(b.NewPassword); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	u, err := h.resolveAccount(c.Request.Context(), strings.TrimSpace(b.Account))
+	if errors.Is(err, repository.ErrNotFound) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "驗證碼無效或帳號不存在"})
+		return
+	}
+	if err != nil {
+		log.Printf("WARN: password reset lookup %q: %v", maskAccount(b.Account), err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "reset failed"})
+		return
+	}
+	if u.Email == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "該帳號沒有 email，無法用驗證碼重置"})
+		return
+	}
+	if err := h.Auth.VerifyEmailCode(c.Request.Context(), *u.Email, b.Code); err != nil {
+		if !errors.Is(err, service.ErrOTPInvalid) && !errors.Is(err, service.ErrTooManyTries) {
+			log.Printf("WARN: verify reset code for %s: %v", maskEmail(*u.Email), err)
+		}
+		switch {
+		case errors.Is(err, service.ErrOTPInvalid):
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "驗證碼錯誤或已過期"})
+		case errors.Is(err, service.ErrTooManyTries):
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "嘗試次數過多，請重新發送驗證碼"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "reset failed"})
+		}
+		return
+	}
+	hash, err := service.HashPassword(b.NewPassword)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "reset failed"})
+		return
+	}
+	u, err = h.Users.SetCredential(c.Request.Context(), u.ID, nil, hash)
+	if err != nil {
+		log.Printf("WARN: set credential for user %s: %v", u.ID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to set password"})
+		return
+	}
+	token, err := h.Auth.IssueSession(c.Request.Context(), u.ID)
+	if err != nil {
+		log.Printf("WARN: issue session for user %s: %v", u.ID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create session"})
+		return
+	}
+	loginResponse(c, u, token)
+}
+
+// maskAccount log 裡遮帳號（用戶名照露、遮 email）。
+func maskAccount(account string) string {
+	if emailRe.MatchString(account) {
+		return maskEmail(account)
+	}
+	return account
 }

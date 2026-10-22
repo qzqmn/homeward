@@ -13,6 +13,9 @@ export interface AuthUser {
   verified_volunteer: boolean;
   /** 管理者（users.role='admin'）；登入時由後端回傳，畫面以 GET /me 為準。 */
   is_admin?: boolean;
+  /** 密碼登入相關：是否已設用戶名/密碼（email 註冊後未設就要先補設）。 */
+  username?: string | null;
+  has_password?: boolean;
 }
 
 interface AuthState {
